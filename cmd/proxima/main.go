@@ -2,16 +2,29 @@ package main
 
 import (
 	"flag"
+	"github.com/Symantec/Dominator/lib/flagutil"
 	"github.com/Symantec/Dominator/lib/fsutil"
+	"github.com/Symantec/Dominator/lib/logbuf"
+	"github.com/Symantec/proxima/cmd/proxima/splash"
 	"github.com/Symantec/scotty/lib/apiutil"
+	"github.com/Symantec/tricorder/go/tricorder"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/uuid"
 	"log"
 	"net/http"
+	"net/rpc"
 	"net/url"
-	"os"
 	"time"
 )
+
+var (
+	fConfigFile = flag.String("config", "./proxima.yaml", "config file")
+	fPorts      = flagutil.StringList{"8086"}
+)
+
+func init() {
+	flag.Var(&fPorts, "ports", "Comma separated list of ports")
+}
 
 func setHeader(w http.ResponseWriter, r *http.Request, key, value string) {
 	r.Header.Set(key, value)
@@ -35,12 +48,38 @@ type resultListType struct {
 	Results []seriesListType `json:"results"`
 }
 
+func performQuery(
+	executer *executerType,
+	query, db, epoch string) (*resultListType, error) {
+	resp, err := executer.Query(query, db, epoch)
+	if err == nil {
+		err = resp.Error()
+	}
+	if err != nil {
+		return nil, err
+	}
+	results := &resultListType{
+		Results: make([]seriesListType, len(resp.Results)),
+	}
+	for i := range results.Results {
+		theSeries := resp.Results[i].Series
+		if theSeries == nil {
+			theSeries = []models.Row{}
+		}
+		results.Results[i] = seriesListType{
+			Series: theSeries,
+		}
+	}
+	return results, nil
+}
+
 func main() {
-	fConfigFile := flag.String("config", "./proxima.config", "config file")
-	fPort := flag.String("port", ":8086", "listen port")
+	tricorder.RegisterFlags()
 	flag.Parse()
+	rpc.HandleHTTP()
+	circularBuffer := logbuf.New()
+	logger := log.New(circularBuffer, "", log.LstdFlags)
 	executer := newExecuter()
-	logger := log.New(os.Stderr, "", log.LstdFlags)
 	changeCh := fsutil.WatchFile(*fConfigFile, logger)
 	// We want to be sure we have something valid in the config file
 	// initially.
@@ -61,41 +100,37 @@ func main() {
 			readCloser.Close()
 		}
 	}()
+	http.Handle("/",
+		&splash.Handler{
+			Log: circularBuffer,
+		})
 	http.Handle(
 		"/query",
 		uuidHandler(
 			apiutil.NewHandler(
 				func(req url.Values) (interface{}, error) {
-					resp, err := executer.Query(
-						req.Get("q"),
-						req.Get("db"),
-						req.Get("epoch"))
-					if err == nil {
-						err = resp.Error()
-					}
+					resp, err := performQuery(
+						executer, req.Get("q"), req.Get("db"), req.Get("epoch"))
 					if err != nil {
 						return nil, err
 					}
-					results := &resultListType{
-						Results: make([]seriesListType, len(resp.Results)),
-					}
-					for i := range results.Results {
-						theSeries := resp.Results[i].Series
-						if theSeries == nil {
-							theSeries = []models.Row{}
-						}
-						results.Results[i] = seriesListType{
-							Series: theSeries,
-						}
-					}
-					return results, nil
-
+					return resp, err
 				},
 				nil,
 			),
 		),
 	)
-	if err := http.ListenAndServe(*fPort, nil); err != nil {
+	if len(fPorts) == 0 {
+		log.Fatal("At least one port required.")
+	}
+	for _, port := range fPorts[1:] {
+		go func(port string) {
+			if err := http.ListenAndServe(":"+port, nil); err != nil {
+				log.Fatal(err)
+			}
+		}(port)
+	}
+	if err := http.ListenAndServe(":"+fPorts[0], nil); err != nil {
 		log.Fatal(err)
 	}
 }
