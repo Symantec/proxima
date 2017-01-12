@@ -18,8 +18,9 @@ import (
 )
 
 var (
-	fConfigFile = flag.String("config", "./proxima.yaml", "config file")
-	fPorts      = flagutil.StringList{"8086"}
+	fConfigFile = flag.String(
+		"config", "/etc/proxima/proxima.yaml", "config file")
+	fPorts = flagutil.StringList{"8086"}
 )
 
 func init() {
