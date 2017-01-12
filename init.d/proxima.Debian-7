@@ -1,0 +1,99 @@
+#! /bin/bash --posix
+
+### BEGIN INIT INFO
+# Provides:		proxima
+# Required-Start:	$local_fs $network $syslog
+# Required-Stop:	$local_fs $network $syslog
+# Default-Start:	2 3 4 5
+# Default-Stop:		0 1 6
+# Short-Description:	Proxima daemon
+### END INIT INFO
+
+# /etc/init.d/proxima: start and stop proxima
+
+. /lib/lsb/init-functions
+
+umask 022
+
+readonly default_log_dir='/var/log/proxima'
+
+DAEMON='/usr/local/sbin/proxima'
+LOG_DIR="$default_log_dir"
+LOG_QUOTA=
+LOGBUF_LINES=
+LOOP_PIDFILE='/var/run/proxima.loop.pid'
+PIDFILE='/var/run/proxima.pid'
+USERNAME='proxima'
+
+PROG_ARGS=
+
+[ -f /etc/default/proxima ] && . /etc/default/proxima
+
+test -x "$DAEMON" || exit 0
+
+export PATH="${PATH:+$PATH:}/usr/local/bin:/usr/local/sbin:/usr/sbin:/sbin"
+
+mkdir -m 0755 -p "$LOG_DIR"
+chown "$USERNAME" "$LOG_DIR"
+
+chown -R "${USERNAME}:users" /etc/proxima
+
+PROG_ARGS="$PROG_ARGS"
+
+if [ -n "$LOG_DIR" ] && [ "$LOG_DIR" != "$default_log_dir" ]; then
+    PROG_ARGS="$PROG_ARGS -logDir=$LOG_DIR"
+fi
+
+if [ -n "$LOG_QUOTA" ]; then
+    PROG_ARGS="$PROG_ARGS -logQuota=$LOG_QUOTA"
+fi
+
+if [ -n "$LOGBUF_LINES" ]; then
+    PROG_ARGS="$PROG_ARGS -logbufLines=$LOGBUF_LINES"
+fi
+
+do_start ()
+{
+    start-stop-daemon --start --quiet --pidfile "$PIDFILE" \
+		      --exec "$DAEMON" --chuid "$USERNAME" --make-pidfile -- \
+		      $PROG_ARGS
+}
+
+start_loop ()
+{
+    echo "$BASHPID" > "$LOOP_PIDFILE"
+    while true; do
+	do_start
+	rm -f "$PIDFILE"
+	sleep 1
+    done
+}
+
+case "$1" in
+  start)
+	log_daemon_msg "Starting proxima daemon" "proxima" || true
+	(start_loop < /dev/null &> /dev/null &)
+	;;
+  stop)
+	log_daemon_msg "Stopping proxima daemon" "proxima" || true
+	[ -s "$LOOP_PIDFILE" ] && kill -KILL $(cat "$LOOP_PIDFILE")
+	[ -s "$PIDFILE" ]      && kill -TERM $(cat "$PIDFILE")
+	rm -f "$LOOP_PIDFILE" "$PIDFILE"
+	;;
+
+  reload|force-reload)
+	$0 stop
+	$0 start
+	;;
+
+  restart)
+	$0 stop
+	$0 start
+	;;
+
+  *)
+	log_action_msg "Usage: /etc/init.d/proxima {start|stop|reload|force-reload|restart}" || true
+	exit 1
+esac
+
+exit 0
