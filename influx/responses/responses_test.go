@@ -14,6 +14,14 @@ func newPoint(x int64) []interface{} {
 	return []interface{}{nil, json.Number(strconv.FormatInt(x, 10)), nil}
 }
 
+func newPoint1(x int64) []interface{} {
+	return []interface{}{json.Number(strconv.FormatInt(x, 10)), nil}
+}
+
+func newPoint2(x int64, val float64) []interface{} {
+	return []interface{}{json.Number(strconv.FormatInt(x, 10)), json.Number(strconv.FormatFloat(val, 'g', -1, 64))}
+}
+
 func TestMergeMessages(t *testing.T) {
 	Convey("Merging no responses yields zero reponse", t, func() {
 		resp, err := responses.Merge()
@@ -388,6 +396,203 @@ func TestMerge(t *testing.T) {
 			Convey("Merge returns error", func() {
 				So(err, ShouldNotBeNil)
 			})
+		})
+
+	})
+
+}
+
+func TestMergePreferred(t *testing.T) {
+	Convey("Merge two responses", t, func() {
+		poa1 := newPoint2(1000, 10.0)
+		poa2 := newPoint2(1025, 10.25)
+		poa3 := newPoint2(1050, 10.5)
+		poa4 := newPoint2(1075, 10.75)
+		poa5 := newPoint2(1100, 11.0)
+		poa6 := newPoint2(1125, 11.25)
+		poa7 := newPoint2(1150, 11.5)
+		poa8 := newPoint2(1175, 11.75)
+
+		ppa1 := newPoint1(1000.0)
+		ppa2 := newPoint1(1010.0)
+		ppa3 := newPoint1(1025.0)
+		ppa4 := newPoint1(1035.0)
+		ppa5 := newPoint1(1050.0)
+		ppa6 := newPoint1(1075.0)
+		ppa7 := newPoint2(1100, 21.0)
+		ppa8 := newPoint2(1125, 21.25)
+		ppa9 := newPoint2(1150, 21.5)
+		ppa10 := newPoint2(1175, 0.0)
+
+		pob1 := newPoint2(2000, 30.0)
+		pob2 := newPoint2(2025, 30.25)
+		pob3 := newPoint2(2050, 30.5)
+		pob4 := newPoint2(2075, 30.75)
+		pob5 := newPoint2(2100, 31.0)
+		pob6 := newPoint2(2125, 31.25)
+		pob7 := newPoint2(2150, 31.5)
+		pob8 := newPoint2(2175, 31.75)
+
+		ppb1 := newPoint2(2000.0, 0.0)
+		ppb2 := newPoint2(2010.0, 0.0)
+		ppb3 := newPoint2(2025.0, 0.0)
+		ppb4 := newPoint2(2035.0, 0.0)
+		ppb5 := newPoint2(2050.0, 0.0)
+		ppb6 := newPoint2(2075.0, 0.0)
+		ppb7 := newPoint2(2100, 41.0)
+		ppb8 := newPoint2(2125, 41.25)
+		ppb9 := newPoint2(2150, 41.5)
+		ppb10 := newPoint2(2175, 0.0)
+
+		poc1 := newPoint2(9919, 91.0)
+		poc2 := newPoint2(9929, 92.0)
+
+		ppc1 := newPoint2(9919, 11.0)
+		ppc2 := newPoint2(9929, 22.0)
+
+		pod1 := newPoint2(5000, 50.0)
+		pod2 := newPoint2(5100, 51.0)
+
+		ppe1 := newPoint2(6000, 60.0)
+		ppe2 := newPoint2(6100, 61.0)
+
+		oaValues := [][]interface{}{
+			poa3, poa6, poa1, poa4, poa7, poa2, poa5, poa8}
+		paValues := [][]interface{}{
+			ppa7, ppa4, ppa1, ppa8, ppa5, ppa2, ppa9, ppa6, ppa3, ppa10}
+		obValues := [][]interface{}{
+			pob3, pob6, pob1, pob4, pob7, pob2, pob5, pob8}
+		pbValues := [][]interface{}{
+			ppb7, ppb4, ppb1, ppb8, ppb5, ppb2, ppb9, ppb6, ppb3, ppb10}
+		ocValues := [][]interface{}{poc2, poc1}
+		pcValues := [][]interface{}{ppc1, ppc2}
+		odValues := [][]interface{}{pod1, pod2}
+		peValues := [][]interface{}{ppe2, ppe1}
+
+		oaSeries := models.Row{
+			Name:    "series_a",
+			Columns: []string{"time", "value"},
+			Values:  oaValues,
+		}
+		paSeries := models.Row{
+			Name:    "series_a",
+			Columns: []string{"time", "value"},
+			Values:  paValues,
+		}
+
+		obSeries := models.Row{
+			Name:    "series_b",
+			Columns: []string{"time", "value"},
+			Values:  obValues,
+		}
+		pbSeries := models.Row{
+			Name:    "series_b",
+			Columns: []string{"time", "value"},
+			Values:  pbValues,
+		}
+
+		ocSeries := models.Row{
+			Name:    "series_c",
+			Columns: []string{"nottime", "value"},
+			Values:  ocValues,
+		}
+		pcSeries := models.Row{
+			Name:    "series_c",
+			Columns: []string{"nottime", "value"},
+			Values:  pcValues,
+		}
+
+		odSeries := models.Row{
+			Name:    "series_d",
+			Columns: []string{"time", "value"},
+			Values:  odValues,
+		}
+		peSeries := models.Row{
+			Name:    "series_e",
+			Columns: []string{"nottime", "value"},
+			Values:  peValues,
+		}
+
+		oResult := client.Result{
+			Series: []models.Row{
+				oaSeries,
+				obSeries,
+				ocSeries,
+				odSeries,
+			},
+		}
+		pResult := client.Result{
+			Series: []models.Row{
+				paSeries,
+				pbSeries,
+				pcSeries,
+				peSeries,
+			},
+		}
+
+		oResponse := &client.Response{Results: []client.Result{oResult}}
+		pResponse := &client.Response{Results: []client.Result{pResult}}
+		Convey("Result should be correct", func() {
+			expectedResult := client.Result{
+				Series: []models.Row{
+					{
+						Name:    "series_a",
+						Columns: []string{"time", "value"},
+						Values: [][]interface{}{
+							poa1,
+							poa2,
+							poa3,
+							poa4,
+							ppa7,
+							ppa8,
+							ppa9,
+							ppa10,
+						},
+					},
+					{
+						Name:    "series_b",
+						Columns: []string{"time", "value"},
+						Values: [][]interface{}{
+							pob1,
+							pob2,
+							pob3,
+							pob4,
+							ppb7,
+							ppb8,
+							ppb9,
+							ppb10,
+						},
+					},
+					{
+						Name:    "series_c",
+						Columns: []string{"nottime", "value"},
+						Values: [][]interface{}{
+							poc2,
+							poc1,
+						},
+					},
+					{
+						Name:    "series_d",
+						Columns: []string{"time", "value"},
+						Values: [][]interface{}{
+							pod1,
+							pod2,
+						},
+					},
+					{
+						Name:    "series_e",
+						Columns: []string{"nottime", "value"},
+						Values: [][]interface{}{
+							ppe2,
+							ppe1,
+						},
+					},
+				},
+			}
+			actual, err := responses.MergePreferred(oResponse, pResponse)
+			So(err, ShouldBeNil)
+			So(actual.Results[0], ShouldResemble, expectedResult)
+
 		})
 
 	})

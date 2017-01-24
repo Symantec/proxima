@@ -61,21 +61,38 @@ func (l instanceList) maxTime(i int, now time.Time) time.Time {
 // slice.
 // However, elements in splitQueries will be nil if the query does not apply
 // to the corresponding instance in this slice.
+//
+// If no error, hasUnknownRetentionPolicy is true if one of of the instances
+// has unknown retention policy. This instance will always be the very last
+// instance in this slice. For this instance, the returned split query is
+// always a copy of query itself.
 func (l instanceList) SplitQuery(
 	query *influxql.Query, now time.Time) (
-	splitQueries []*influxql.Query, err error) {
+	splitQueries []*influxql.Query,
+	hasUnknownRetentionPolicy bool,
+	err error) {
 	if len(l) == 0 {
 		return
 	}
 	result := make([]*influxql.Query, len(l))
+	var unknownRetentionPolicy bool
 	for i := range result {
-		result[i], err = qlutils.QuerySetTimeRange(
-			query, l.minTime(i, now), l.maxTime(i, now))
-		if err != nil {
-			return
+		min := l.minTime(i, now)
+		max := l.maxTime(i, now)
+		if min == now {
+			// Our source has unknown retention policy. Send defensive copy
+			// of entire query.
+			queryCopy := *query
+			result[i] = &queryCopy
+			unknownRetentionPolicy = true
+		} else {
+			result[i], err = qlutils.QuerySetTimeRange(query, min, max)
+			if err != nil {
+				return
+			}
 		}
 	}
-	return result, nil
+	return result, unknownRetentionPolicy, nil
 }
 
 // executerType executes queries across multiple influx db instances.
@@ -97,6 +114,18 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 	if err := yamlutil.Read(r, &cluster); err != nil {
 		return err
 	}
+	// We allow only one source with missing / zero duration. This is the
+	// source for which we do not know the retention policy.
+	var zeroDurationFound bool
+	for _, instance := range cluster.Instances {
+		if instance.Duration == 0 {
+			if zeroDurationFound {
+				return errors.New("Only one source with unknown duration allowed.")
+			}
+			zeroDurationFound = true
+		}
+	}
+
 	newInstances := make(instanceList, len(cluster.Instances))
 	for i := range newInstances {
 		cl, err := client.NewHTTPClient(client.HTTPConfig{
@@ -143,7 +172,7 @@ func (e *executerType) Query(queryStr, database, epoch string) (
 		return nil, err
 	}
 	fetchedInstances := e.get()
-	querySplits, err := fetchedInstances.SplitQuery(query, now)
+	querySplits, unknownRetentionPolicyPresent, err := fetchedInstances.SplitQuery(query, now)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +214,15 @@ func (e *executerType) Query(queryStr, database, epoch string) (
 		if err != nil {
 			return nil, err
 		}
+	}
+	if unknownRetentionPolicyPresent {
+		responsesToMerge := len(responseList)
+		mergedResponse, err := responses.Merge(
+			responseList[:responsesToMerge-1]...)
+		if err != nil {
+			return nil, err
+		}
+		return responses.MergePreferred(mergedResponse, responseList[responsesToMerge-1])
 	}
 	return responses.Merge(responseList...)
 }

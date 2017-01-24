@@ -28,3 +28,19 @@ import (
 func Merge(responses ...*client.Response) (*client.Response, error) {
 	return mergeResponses(responses)
 }
+
+// MergePreferred merges a response from a preferred source, such as scotty,
+// with an existing response using the following rules.
+//
+// 1. MergePreferred combines the rows from preferred with the rows in
+//    response.
+// 2. If preferred and response both contain a row with both the same name
+//    and the same tags then MergePreferred merges that row using the
+//    the following rules:
+// 2a. Find the earliest time for which the row in preferred has data
+// 2b. To merge use the values in original for times before the time in 2a and
+//     use the values in preferred for times on or after the time in 2a
+func MergePreferred(response, preferred *client.Response) (
+	*client.Response, error) {
+	return mergePreferred(response, preferred)
+}
