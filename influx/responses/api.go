@@ -1,6 +1,8 @@
 package responses
 
 import (
+	"github.com/Symantec/scotty/tsdb"
+	"github.com/Symantec/scotty/tsdbjson"
 	"github.com/influxdata/influxdb/client/v2"
 )
 
@@ -43,4 +45,24 @@ func Merge(responses ...*client.Response) (*client.Response, error) {
 func MergePreferred(response, preferred *client.Response) (
 	*client.Response, error) {
 	return mergePreferred(response, preferred)
+}
+
+// FromTaggedTimeSeriesSets converts a group of TaggedTimeSeriesSet
+// instances to an influx db client.Response instance
+// Elements in the pqs slice correspond to elements in the series and
+// colNames slice.
+// Elements in the series slice may be nil. FromTaggedTimeSeriesSets panics
+// if pqs, series, and colNames have different lengths.
+func FromTaggedTimeSeriesSets(
+	series []*tsdb.TaggedTimeSeriesSet,
+	colNames [][]string,
+	pqs []tsdbjson.ParsedQuery,
+	epochConversion func(ts int64) int64) *client.Response {
+	if len(series) != len(pqs) {
+		panic("Slices must be of equal length")
+	}
+	if len(series) != len(colNames) {
+		panic("Slices must be of equal length")
+	}
+	return fromTaggedTimeSeriesSets(series, colNames, pqs, epochConversion)
 }
