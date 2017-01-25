@@ -3,6 +3,8 @@ package responses_test
 import (
 	"encoding/json"
 	"github.com/Symantec/proxima/influx/responses"
+	"github.com/Symantec/scotty/tsdb"
+	"github.com/Symantec/scotty/tsdbjson"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/models"
 	. "github.com/smartystreets/goconvey/convey"
@@ -97,6 +99,230 @@ func TestMergeMessages(t *testing.T) {
 				},
 			}
 			So(mergedResponses, ShouldResemble, expected)
+		})
+	})
+}
+
+func TestFromTaggedTimeSeriesSets(t *testing.T) {
+	Convey("Given two ParsedQueries", t, func() {
+		// We only fill in the needed fields
+		pq := tsdbjson.ParsedQuery{
+			Aggregator: tsdbjson.AggregatorSpec{
+				DownSample: &tsdbjson.DownSampleSpec{
+					DurationInSeconds: 500.0,
+				},
+			},
+			Start: 2499.0,
+			End:   5000.0,
+		}
+		pq2 := tsdbjson.ParsedQuery{
+			Aggregator: tsdbjson.AggregatorSpec{
+				DownSample: &tsdbjson.DownSampleSpec{
+					DurationInSeconds: 300.0,
+				},
+			},
+			Start: 1800.0,
+			End:   2101.0,
+		}
+		epochConverter := func(ts int64) int64 { return ts / 2 }
+		Convey("Given two simple series set", func() {
+			taggedTimeSeriesSet := &tsdb.TaggedTimeSeriesSet{
+				MetricName: "/my/metric",
+				Data: []tsdb.TaggedTimeSeries{
+					{
+						Values: tsdb.TimeSeries{
+							{3000.0, 30.0},
+							{3500.0, 35.0},
+							{4000.0, 40.0}},
+					},
+				},
+			}
+			taggedTimeSeriesSet2 := &tsdb.TaggedTimeSeriesSet{
+				MetricName: "/my/metric2",
+				Data: []tsdb.TaggedTimeSeries{
+					{
+						Values: tsdb.TimeSeries{
+							{1800.0, 18.0},
+							{2100.0, 21.0}},
+					},
+				},
+			}
+
+			result := client.Result{
+				Series: []models.Row{
+					{
+						Name:    "/my/metric",
+						Tags:    map[string]string{},
+						Columns: []string{"time", "low"},
+						Values: [][]interface{}{
+							{int64(1000), nil},
+							{int64(1250), nil},
+							{int64(1500), 30.0},
+							{int64(1750), 35.0},
+							{int64(2000), 40.0},
+							{int64(2250), nil},
+						},
+					},
+				},
+			}
+			result2 := client.Result{
+				Series: []models.Row{
+					{
+						Name:    "/my/metric2",
+						Tags:    map[string]string{},
+						Columns: []string{"time2", "high"},
+						Values: [][]interface{}{
+							{int64(900), 18.0},
+							{int64(1050), 21.0},
+						},
+					},
+				},
+			}
+			expected := &client.Response{
+				Results: []client.Result{result, result2},
+			}
+
+			Convey("correct response", func() {
+				response := responses.FromTaggedTimeSeriesSets(
+					[]*tsdb.TaggedTimeSeriesSet{
+						taggedTimeSeriesSet,
+						taggedTimeSeriesSet2,
+					},
+					[][]string{
+						{"time", "low"},
+						{"time2", "high"},
+					},
+					[]tsdbjson.ParsedQuery{pq, pq2},
+					epochConverter)
+
+				So(response, ShouldResemble, expected)
+			})
+
+			Convey("correct response with a nil", func() {
+				response := responses.FromTaggedTimeSeriesSets(
+					[]*tsdb.TaggedTimeSeriesSet{
+						taggedTimeSeriesSet,
+						nil,
+						taggedTimeSeriesSet2,
+					},
+					[][]string{
+						{"time", "low"},
+						{"foo", "bar"},
+						{"time2", "high"},
+					},
+					[]tsdbjson.ParsedQuery{pq, pq, pq2},
+					epochConverter)
+				So(response, ShouldResemble, expected)
+			})
+		})
+		Convey("Given two group by series set", func() {
+			taggedTimeSeriesSet := &tsdb.TaggedTimeSeriesSet{
+				MetricName: "/my/groupMetric",
+				Data: []tsdb.TaggedTimeSeries{
+					{
+						Tags: tsdb.TagSet{
+							HostName: "host1",
+							AppName:  "app1",
+						},
+					},
+					{
+						Tags: tsdb.TagSet{
+							HostName: "host2",
+							AppName:  "app1",
+						},
+					},
+					{
+						Tags: tsdb.TagSet{
+							HostName: "host1",
+							AppName:  "app2",
+						},
+					},
+					{
+						Tags: tsdb.TagSet{
+							HostName: "host2",
+							AppName:  "app2",
+						},
+					},
+				},
+				GroupedByHostName: true,
+				GroupedByAppName:  true,
+			}
+			result := client.Result{
+				Series: []models.Row{
+					{
+						Name: "/my/groupMetric",
+						Tags: map[string]string{
+							"appname": "app1", "host": "host1"},
+						Columns: []string{"foo", "bar"},
+						Values: [][]interface{}{
+							{int64(1000), nil},
+							{int64(1250), nil},
+							{int64(1500), nil},
+							{int64(1750), nil},
+							{int64(2000), nil},
+							{int64(2250), nil},
+						},
+					},
+					{
+						Name: "/my/groupMetric",
+						Tags: map[string]string{
+							"appname": "app1", "host": "host2"},
+						Columns: []string{"foo", "bar"},
+						Values: [][]interface{}{
+							{int64(1000), nil},
+							{int64(1250), nil},
+							{int64(1500), nil},
+							{int64(1750), nil},
+							{int64(2000), nil},
+							{int64(2250), nil},
+						},
+					},
+					{
+						Name: "/my/groupMetric",
+						Tags: map[string]string{
+							"appname": "app2", "host": "host1"},
+						Columns: []string{"foo", "bar"},
+						Values: [][]interface{}{
+							{int64(1000), nil},
+							{int64(1250), nil},
+							{int64(1500), nil},
+							{int64(1750), nil},
+							{int64(2000), nil},
+							{int64(2250), nil},
+						},
+					},
+					{
+						Name: "/my/groupMetric",
+						Tags: map[string]string{
+							"appname": "app2", "host": "host2"},
+						Columns: []string{"foo", "bar"},
+						Values: [][]interface{}{
+							{int64(1000), nil},
+							{int64(1250), nil},
+							{int64(1500), nil},
+							{int64(1750), nil},
+							{int64(2000), nil},
+							{int64(2250), nil},
+						},
+					},
+				},
+			}
+			expected := &client.Response{
+				Results: []client.Result{result},
+			}
+			Convey("correct response", func() {
+				response := responses.FromTaggedTimeSeriesSets(
+					[]*tsdb.TaggedTimeSeriesSet{
+						taggedTimeSeriesSet,
+					},
+					[][]string{
+						{"foo", "bar"},
+					},
+					[]tsdbjson.ParsedQuery{pq},
+					epochConverter)
+
+				So(response, ShouldResemble, expected)
+			})
 		})
 	})
 }

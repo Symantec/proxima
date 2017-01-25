@@ -4,15 +4,140 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/Symantec/scotty/tsdb"
+	"github.com/Symantec/scotty/tsdbjson"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/models"
 	"reflect"
 	"sort"
 )
 
+const (
+	kInfluxHostName = "host"
+	kInfluxAppName  = "appname"
+)
+
 var (
 	errPartialNotSupported = errors.New("Partial rows not supported")
 )
+
+type pointFactoryType func(ts int64) int64
+
+func (p pointFactoryType) New(
+	tsInSeconds int64, value interface{}) []interface{} {
+	return []interface{}{p(tsInSeconds), value}
+}
+
+func extractDownsampledValues(
+	values tsdb.TimeSeries,
+	start float64,
+	end float64,
+	downSample float64,
+	pf pointFactoryType) (results [][]interface{}) {
+	startInt := int64(start)
+	endInt := int64(end)
+	downSampleInt := int64(downSample)
+	startInt = (startInt / downSampleInt) * downSampleInt
+	endInt = ((endInt + downSampleInt - 1) / downSampleInt) * downSampleInt
+	srcIdx, destIdx := 0, 0
+	destTs := startInt
+	srcLen := len(values)
+	destLen := int((endInt - startInt) / downSampleInt)
+	results = make([][]interface{}, destLen)
+	for destIdx < destLen {
+		// If our source values are exhaused, use nil in destination
+		if srcIdx >= srcLen {
+			results[destIdx] = pf.New(destTs, nil)
+			destIdx++
+			destTs += downSampleInt
+			continue
+		}
+		srcTs := int64(values[srcIdx].Ts)
+		// If our source timestamp is less than our dest timestamp, advance
+		// source one position
+		if srcTs < destTs {
+			srcIdx++
+			continue
+		}
+		// If our source timestamp is bigger than our dest timestamp, use
+		// nil in destination
+		if srcTs > destTs {
+			results[destIdx] = pf.New(destTs, nil)
+			destIdx++
+			destTs += downSampleInt
+			continue
+		}
+		// If our source and dest timestamp are equal, use the corresponding
+		// source value in the destination
+		results[destIdx] = pf.New(destTs, values[srcIdx].Value)
+		destIdx++
+		destTs += downSampleInt
+		srcIdx++
+	}
+	return
+}
+
+func fromTaggedTimeSeriesSet(
+	seriesSet *tsdb.TaggedTimeSeriesSet,
+	colNames []string,
+	pq *tsdbjson.ParsedQuery,
+	pf pointFactoryType) (result client.Result) {
+	// Defensive copy of colNames because it becomes part of returned data
+	// structure.
+	colNamesCopy := make([]string, len(colNames))
+	copy(colNamesCopy, colNames)
+
+	name := seriesSet.MetricName
+	result.Series = make([]models.Row, len(seriesSet.Data))
+	for i, series := range seriesSet.Data {
+		tags := make(map[string]string)
+		if seriesSet.GroupedByHostName {
+			tags[kInfluxHostName] = series.Tags.HostName
+		}
+		if seriesSet.GroupedByAppName {
+			tags[kInfluxAppName] = series.Tags.AppName
+		}
+		downSample := pq.Aggregator.DownSample
+		var values [][]interface{}
+		if downSample != nil {
+			values = extractDownsampledValues(
+				series.Values,
+				pq.Start,
+				pq.End,
+				downSample.DurationInSeconds,
+				pf)
+		} else {
+			values := make([][]interface{}, len(series.Values))
+			for j, tsValue := range series.Values {
+				values[j] = pf.New(int64(tsValue.Ts), tsValue.Value)
+			}
+		}
+		result.Series[i] = models.Row{
+			Name:    name,
+			Tags:    tags,
+			Columns: colNamesCopy,
+			Values:  values}
+	}
+	sort.Sort(rowListType(result.Series))
+	return
+}
+
+func fromTaggedTimeSeriesSets(
+	seriesList []*tsdb.TaggedTimeSeriesSet,
+	colNames [][]string,
+	pqs []tsdbjson.ParsedQuery,
+	epochConversion func(ts int64) int64) *client.Response {
+	var results []client.Result
+	for i, series := range seriesList {
+		if series == nil {
+			continue
+		}
+		results = append(
+			results, fromTaggedTimeSeriesSet(
+				series, colNames[i], &pqs[i], epochConversion))
+	}
+	return &client.Response{Results: results}
+}
 
 func customMergeResponses(
 	responses []*client.Response,
@@ -293,6 +418,18 @@ func sortByTime(values [][]interface{}, timeIdx int) error {
 	}
 	sort.Sort(s)
 	return nil
+}
+
+type rowListType []models.Row
+
+func (l rowListType) Len() int { return len(l) }
+
+func (l rowListType) Swap(i, j int) {
+	l[i], l[j] = l[j], l[i]
+}
+
+func (l rowListType) Less(i, j int) bool {
+	return compareRows(&l[i], &l[j]) < 0
 }
 
 type rowPtrListType []*models.Row
