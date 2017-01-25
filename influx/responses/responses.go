@@ -14,8 +14,10 @@ var (
 	errPartialNotSupported = errors.New("Partial rows not supported")
 )
 
-func mergeResponses(
-	responses []*client.Response) (*client.Response, error) {
+func customMergeResponses(
+	responses []*client.Response,
+	mergeResultsFunc func([]client.Result) (client.Result, error)) (
+	*client.Response, error) {
 	if len(responses) == 0 {
 		return &client.Response{}, nil
 	}
@@ -43,12 +45,63 @@ func mergeResponses(
 			resultsToMerge[j] = responses[j].Results[i]
 		}
 		var err error
-		mergedResultList[i], err = mergeResults(resultsToMerge)
+		mergedResultList[i], err = mergeResultsFunc(resultsToMerge)
 		if err != nil {
 			return nil, err
 		}
 	}
 	return &client.Response{Results: mergedResultList}, nil
+}
+
+func mergeResponses(
+	responses []*client.Response) (*client.Response, error) {
+	return customMergeResponses(responses, mergeResults)
+}
+
+func mergePreferred(
+	response, preferred *client.Response) (*client.Response, error) {
+	return customMergeResponses(
+		[]*client.Response{response, preferred},
+		mergePreferredResults)
+}
+
+func mergePreferredResults(results []client.Result) (
+	merged client.Result, err error) {
+	var mergedMessages []*client.Message
+	original := toRowPtrList(results[0].Series)
+	preferred := toRowPtrList(results[1].Series)
+	for _, result := range results {
+		mergedMessages = append(mergedMessages, result.Messages...)
+	}
+	sort.Sort(original)
+	sort.Sort(preferred)
+	var mergedRows []models.Row
+	for original.Peek() != nil || preferred.Peek() != nil {
+		if original.Peek() == nil {
+			mergedRows = append(mergedRows, *preferred.Next())
+		} else if preferred.Peek() == nil {
+			mergedRows = append(mergedRows, *original.Next())
+		} else {
+			compRes := compareRows(original.Peek(), preferred.Peek())
+			if compRes < 0 {
+				mergedRows = append(mergedRows, *original.Next())
+			} else if compRes > 0 {
+				mergedRows = append(mergedRows, *preferred.Next())
+			} else {
+				// rows in original and preferred are same
+				// they must be merged
+				orig := original.Next()
+				aRow, err := mergePreferredRows(
+					orig, preferred.Next())
+				if err != nil {
+					// If anything goes wrong, use original
+					aRow = *orig
+				}
+				mergedRows = append(mergedRows, aRow)
+			}
+		}
+	}
+	return client.Result{Series: mergedRows, Messages: mergedMessages}, nil
 }
 
 func mergeResults(results []client.Result) (merged client.Result, err error) {
@@ -70,6 +123,88 @@ func mergeResults(results []client.Result) (merged client.Result, err error) {
 	return client.Result{Series: mergedRows, Messages: mergedMessages}, nil
 }
 
+func checkColumnsMatch(row1, row2 *models.Row) error {
+	if !reflect.DeepEqual(
+		row1.Columns, row2.Columns) {
+		return fmt.Errorf(
+			"Columns don't match for Name: %v, Tags: %v",
+			row1.Name, row1.Tags)
+	}
+	return nil
+}
+
+func toInt64(val interface{}) int64 {
+	jsonNumber, ok := val.(json.Number)
+	if !ok {
+		return 0
+	}
+	result, _ := jsonNumber.Int64()
+	return result
+}
+
+func isZero(val interface{}) bool {
+	jsonNumber, ok := val.(json.Number)
+	// Then its a string or some other complex type
+	if !ok {
+		return false
+	}
+	floatValue, _ := jsonNumber.Float64()
+	return floatValue == 0.0
+}
+
+func mergePreferredRows(original, preferred *models.Row) (models.Row, error) {
+	if original.Partial || preferred.Partial {
+		return models.Row{}, errPartialNotSupported
+	}
+	if err := checkColumnsMatch(original, preferred); err != nil {
+		return models.Row{}, err
+	}
+	originalCopy := *original
+	// If not two columsn give up
+	if len(originalCopy.Columns) != 2 {
+		return models.Row{}, errors.New("Rows have more than 2 columns")
+	}
+	timeIndex := indexByName(originalCopy.Columns, "time")
+	// If no time column give up
+	if timeIndex == -1 {
+		return models.Row{}, errors.New("No time column")
+	}
+	// sort values of original by time
+	originalCopy.Values = nil
+	originalCopy.Values = append(
+		originalCopy.Values, original.Values...)
+	if err := sortByTime(originalCopy.Values, timeIndex); err != nil {
+		return models.Row{}, err
+	}
+
+	// Sort values of preferred by time storing in preferredValues
+	var preferredValues [][]interface{}
+	preferredValues = append(
+		preferredValues, preferred.Values...)
+	if err := sortByTime(preferredValues, timeIndex); err != nil {
+		return models.Row{}, err
+	}
+	valueIndex := 1 - timeIndex
+	var startOfPreferred = -1
+	for i := range preferredValues {
+		if preferredValues[i][valueIndex] != nil && !isZero(
+			preferredValues[i][valueIndex]) {
+			startOfPreferred = i
+			break
+		}
+	}
+	preferredStartTimeAsNumber := toInt64(preferredValues[startOfPreferred][timeIndex])
+	endOfOriginal := sort.Search(len(originalCopy.Values),
+		func(i int) bool {
+			return toInt64(originalCopy.Values[i][timeIndex]) >= preferredStartTimeAsNumber
+		})
+	originalCopy.Values = originalCopy.Values[:endOfOriginal]
+	originalCopy.Values = append(
+		originalCopy.Values, preferredValues[startOfPreferred:]...)
+
+	return originalCopy, nil
+}
+
 func reduceRows(rows rowPtrListType) (reduced []models.Row, err error) {
 	currentRow := rows.Next()
 	for currentRow != nil {
@@ -85,18 +220,18 @@ func reduceRows(rows rowPtrListType) (reduced []models.Row, err error) {
 			if nextRow.Partial {
 				return nil, errPartialNotSupported
 			}
-			if !reflect.DeepEqual(
-				nextRow.Columns, currentRow.Columns) {
-				return nil, fmt.Errorf(
-					"Columns don't match for Name: %v, Tags: %v",
-					currentRow.Name, currentRow.Tags)
+			if err := checkColumnsMatch(currentRow, nextRow); err != nil {
+				return nil, err
 			}
 			currentRowCopy.Values = append(
 				currentRowCopy.Values, nextRow.Values...)
 			nextRow = rows.Next()
 		}
-		if err := sortValuesInPlaceByTime(&currentRowCopy); err != nil {
-			return nil, err
+		timeIdx := indexByName(currentRowCopy.Columns, "time")
+		if timeIdx != -1 {
+			if err := sortByTime(currentRowCopy.Values, timeIdx); err != nil {
+				return nil, err
+			}
 		}
 		reduced = append(reduced, currentRowCopy)
 		currentRow = nextRow
@@ -104,21 +239,13 @@ func reduceRows(rows rowPtrListType) (reduced []models.Row, err error) {
 	return
 }
 
-func sortValuesInPlaceByTime(row *models.Row) error {
-	timeIdx := -1
-	for i, columnName := range row.Columns {
-		if columnName == "time" {
-			timeIdx = i
-			break
+func indexByName(names []string, nameToFind string) int {
+	for i, name := range names {
+		if name == nameToFind {
+			return i
 		}
 	}
-	if timeIdx == -1 {
-		return nil
-	}
-	if err := sortByTime(row.Values, timeIdx); err != nil {
-		return err
-	}
-	return nil
+	return -1
 }
 
 type sortTimeSeriesType struct {
@@ -195,6 +322,13 @@ func (l *rowPtrListType) Next() *models.Row {
 	result := (*l)[0]
 	*l = (*l)[1:]
 	return result
+}
+
+func (l rowPtrListType) Peek() *models.Row {
+	if len(l) == 0 {
+		return nil
+	}
+	return l[0]
 }
 
 func compareRows(lhs, rhs *models.Row) int {
