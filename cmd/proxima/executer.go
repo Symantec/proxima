@@ -140,7 +140,10 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 		}
 		_, version, err := cl.Ping(0)
 		if err != nil {
-			return err
+			return fmt.Errorf(
+				"Ping failed for: %s with %v",
+				cluster.Instances[i].HostAndPort,
+				err)
 		}
 		if !strings.HasPrefix(version, "0.13") {
 			return fmt.Errorf(
