@@ -2,6 +2,7 @@ package qlutils
 
 import (
 	"errors"
+	"github.com/Symantec/scotty/tsdbjson"
 	"github.com/influxdata/influxdb/influxql"
 	"time"
 )
@@ -9,6 +10,7 @@ import (
 var (
 	// means the query contains a statement that is not a select statement.
 	ErrNonSelectStatement = errors.New("qlutils: Non select statement")
+	ErrUnsupported        = errors.New("qlutils: Unsupported")
 )
 
 // NewQuery creates a new query instance from a string substituting currentTime
@@ -31,4 +33,18 @@ func QueryTimeRange(
 func QuerySetTimeRange(
 	query *influxql.Query, min, max time.Time) (*influxql.Query, error) {
 	return querySetTimeRange(query, min, max)
+}
+
+// ParsedQuery converts a query to tsdb ParsedQuery instances for scotty.
+// ParsedQuery creates one ParsedQuery instance for each select statement
+// in the passed query.
+// ParseQuery also returns the column names for each result set. The number
+// of column name sets returned always equals the number of ParseQuery
+// instances returned.
+//
+func ParseQuery(query *influxql.Query, now time.Time) (
+	parsedQueries []tsdbjson.ParsedQuery,
+	columnNameSets [][]string,
+	err error) {
+	return parseQuery(query, now)
 }
