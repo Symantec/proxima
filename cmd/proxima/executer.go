@@ -140,7 +140,10 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 		}
 		_, version, err := cl.Ping(0)
 		if err != nil {
-			return err
+			return fmt.Errorf(
+				"Ping failed for: %s with %v",
+				cluster.Instances[i].HostAndPort,
+				err)
 		}
 		if !strings.HasPrefix(version, "0.13") {
 			return fmt.Errorf(
@@ -152,6 +155,15 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 	sort.Sort(newInstances)
 	e.set(newInstances)
 	return nil
+}
+
+// We have to compare the error strings because the RPC call to scotty
+// prevents the error from scotty from being compared directly.
+func isUnsupportedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return err.Error() == qlutils.ErrUnsupported.Error()
 }
 
 // Query runs a query against multiple influx db instances merging the results
@@ -208,23 +220,31 @@ func (e *executerType) Query(queryStr, database, epoch string) (
 		responseIdx++
 	}
 	wg.Wait()
-	responseList = responseList[:responseIdx]
-	errs = errs[:responseIdx]
-	for _, err := range errs {
+	if unknownRetentionPolicyPresent {
+		// The response from the source with unknown retention
+		// policy is always in the last index.
+		if isUnsupportedError(responseList[responseIdx-1].Error()) {
+			// If this special source doesn't support the influx
+			// query, just continue without it.
+			responseIdx--
+			unknownRetentionPolicyPresent = false
+		}
+	}
+	for _, err := range errs[:responseIdx] {
 		if err != nil {
 			return nil, err
 		}
 	}
 	if unknownRetentionPolicyPresent {
-		responsesToMerge := len(responseList)
 		mergedResponse, err := responses.Merge(
-			responseList[:responsesToMerge-1]...)
+			responseList[:responseIdx-1]...)
 		if err != nil {
 			return nil, err
 		}
-		return responses.MergePreferred(mergedResponse, responseList[responsesToMerge-1])
+		return responses.MergePreferred(
+			mergedResponse, responseList[responseIdx-1])
 	}
-	return responses.Merge(responseList...)
+	return responses.Merge(responseList[:responseIdx]...)
 }
 
 func (e *executerType) set(instances instanceList) {
