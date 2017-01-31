@@ -7,6 +7,8 @@ import (
 	"github.com/Symantec/scotty/influx/qlutils"
 	"github.com/Symantec/scotty/influx/responses"
 	"github.com/Symantec/scotty/lib/yamlutil"
+	"github.com/Symantec/tricorder/go/tricorder"
+	"github.com/Symantec/tricorder/go/tricorder/units"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
 	"io"
@@ -117,6 +119,8 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 	// We allow only one source with missing / zero duration. This is the
 	// source for which we do not know the retention policy.
 	var zeroDurationFound bool
+	// The host and port for each source must be unique
+	hostAndPortsSoFar := make(map[string]bool)
 	for _, instance := range cluster.Instances {
 		if instance.Duration == 0 {
 			if zeroDurationFound {
@@ -124,6 +128,10 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 			}
 			zeroDurationFound = true
 		}
+		if hostAndPortsSoFar[instance.HostAndPort] {
+			return fmt.Errorf("%s listed twice", instance.HostAndPort)
+		}
+		hostAndPortsSoFar[instance.HostAndPort] = true
 	}
 
 	newInstances := make(instanceList, len(cluster.Instances))
@@ -152,8 +160,40 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 				version)
 		}
 	}
+	if err := registerMetrics(&cluster); err != nil {
+		return err
+	}
 	sort.Sort(newInstances)
 	e.set(newInstances)
+	return nil
+}
+
+func registerMetrics(cluster *config.Cluster) error {
+	tricorder.UnregisterPath("/proc/servers")
+	influxDir, err := tricorder.RegisterDirectory("/proc/influx")
+	if err != nil {
+		return err
+	}
+	for _, instance := range cluster.Instances {
+		// We need a new "instance" variable with each iteration for holding
+		// metric values for tricorder to prevent each iteration from
+		// clobbering metric values from the previous iterations.
+		instance := instance
+		// Replace slashes in URLs with underscores since slashes are path
+		// dilimeters.
+		instanceDir, err := influxDir.RegisterDirectory(
+			strings.Replace(instance.HostAndPort, "/", "_", -1))
+		if err != nil {
+			return err
+		}
+		if err := instanceDir.RegisterMetric(
+			"duration",
+			&instance.Duration,
+			units.Second,
+			"How far back this instance goes"); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
