@@ -51,8 +51,9 @@ type resultListType struct {
 
 func performQuery(
 	executer *executerType,
+	logger *log.Logger,
 	query, db, epoch string) (*resultListType, error) {
-	resp, err := executer.Query(query, db, epoch)
+	resp, err := executer.Query(logger, query, db, epoch)
 	if err == nil {
 		err = resp.Error()
 	}
@@ -111,7 +112,11 @@ func main() {
 			apiutil.NewHandler(
 				func(req url.Values) (interface{}, error) {
 					resp, err := performQuery(
-						executer, req.Get("q"), req.Get("db"), req.Get("epoch"))
+						executer,
+						logger,
+						req.Get("q"),
+						req.Get("db"),
+						req.Get("epoch"))
 					if err != nil {
 						return nil, err
 					}

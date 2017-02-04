@@ -12,6 +12,7 @@ import (
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
 	"io"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -50,14 +51,6 @@ func (l instanceList) minTime(i int, now time.Time) time.Time {
 	return now.Add(-l[i].Duration)
 }
 
-// return the max time of instance at given index
-func (l instanceList) maxTime(i int, now time.Time) time.Time {
-	if i+1 == len(l) {
-		return now
-	}
-	return now.Add(-l[i+1].Duration)
-}
-
 // SplitQuery splits given query across all the instances by time.
 // If no error, element i of splitQueries corresponds to element i of this
 // slice.
@@ -80,7 +73,6 @@ func (l instanceList) SplitQuery(
 	var unknownRetentionPolicy bool
 	for i := range result {
 		min := l.minTime(i, now)
-		max := l.maxTime(i, now)
 		if min == now {
 			// Our source has unknown retention policy. Send defensive copy
 			// of entire query.
@@ -88,7 +80,11 @@ func (l instanceList) SplitQuery(
 			result[i] = &queryCopy
 			unknownRetentionPolicy = true
 		} else {
-			result[i], err = qlutils.QuerySetTimeRange(query, min, max)
+			// Query up to the present for each backend. This way if
+			// an influx instance with finer grained data goes down,
+			// proxima can use an influx instance with courser grained
+			// data to fill in the missing times.
+			result[i], err = qlutils.QuerySetTimeRange(query, min, now)
 			if err != nil {
 				return
 			}
@@ -146,19 +142,6 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 			Cl:       cl,
 			Duration: cluster.Instances[i].Duration,
 		}
-		_, version, err := cl.Ping(0)
-		if err != nil {
-			return fmt.Errorf(
-				"Ping failed for: %s with %v",
-				cluster.Instances[i].HostAndPort,
-				err)
-		}
-		if !strings.HasPrefix(version, "0.13") {
-			return fmt.Errorf(
-				"At '%s', found infux version '%s', expect 0.13.x",
-				cluster.Instances[i].HostAndPort,
-				version)
-		}
 	}
 	if err := registerMetrics(&cluster); err != nil {
 		return err
@@ -207,33 +190,52 @@ func isUnsupportedError(err error) bool {
 }
 
 // Query runs a query against multiple influx db instances merging the results
-func (e *executerType) Query(queryStr, database, epoch string) (
+// Query uses the logger instance to report any influx instances that are
+// down.
+func (e *executerType) Query(
+	logger *log.Logger, queryStr, database, epoch string) (
 	*client.Response, error) {
 	now := time.Now()
 	query, err := qlutils.NewQuery(queryStr, now)
 	if err == qlutils.ErrNonSelectStatement {
-		// Just send to the influx with biggest duration if there is one.
 		fetchedInstances := e.get()
-		if len(fetchedInstances) > 0 {
-			return fetchedInstances[0].Cl.Query(
-				client.NewQuery(queryStr, database, epoch))
+		if len(fetchedInstances) == 0 {
+			return nil, errNoBackends
 		}
-		return nil, errNoBackends
+		// Just send to the influx with biggest duration that is currently up.
+		aQuery := client.NewQuery(queryStr, database, epoch)
+		var err error
+		for _, instance := range fetchedInstances {
+			var result *client.Response
+			result, err = instance.Cl.Query(aQuery)
+			if err == nil {
+				return result, nil
+			}
+		}
+		// If nothing is up, return last error encountered
+		return nil, err
 	}
+	// Oops, error parsing query
 	if err != nil {
 		return nil, err
 	}
 	fetchedInstances := e.get()
 	querySplits, unknownRetentionPolicyPresent, err := fetchedInstances.SplitQuery(query, now)
+	// Oops, error splitting query
 	if err != nil {
 		return nil, err
 	}
 
+	// Got to have at least one split
 	if len(querySplits) == 0 {
 		return nil, errNoBackends
 	}
 
-	// These are placeholders for the responses from each influx db instance
+	// These are placeholders for the response and error from each influx db
+	// instance. These slices may be shorter than the original querySplits
+	// slice since querySplits may have nil elements indicating that
+	// corresponding backend need not be queried.
+	// responseIdx = effective length of these slices.
 	responseList := make([]*client.Response, len(querySplits))
 	errs := make([]error, len(querySplits))
 
@@ -260,31 +262,68 @@ func (e *executerType) Query(queryStr, database, epoch string) (
 		responseIdx++
 	}
 	wg.Wait()
+
+	if unknownRetentionPolicyPresent {
+		// Remove special response from repsonseList slice.
+		responseIdx--
+	}
+
+	// These will be the responses from influx servers that we merge
+	// This is a subset of the responses in responseList since some of
+	// those influx servers may be unreachable.
+	var responsesToMerge []*client.Response
+
+	// In case none of the responses are viable, report this error
+	// back to client
+	var lastErrorEncountered error
+
+	// Build responsesToMerge
+	for i, err := range errs[:responseIdx] {
+		// If we could reach the source, use its response
+		if err == nil {
+			responsesToMerge = append(responsesToMerge, responseList[i])
+		} else {
+			logger.Println(err)
+			lastErrorEncountered = err
+		}
+	}
+	// This is the response from the special source with unknown retention
+	// policy. It gets merged separately at the end. May remain nil.
+	var specialResponse *client.Response
+
 	if unknownRetentionPolicyPresent {
 		// The response from the source with unknown retention
-		// policy is always in the last index.
-		if isUnsupportedError(responseList[responseIdx-1].Error()) {
-			// If this special source doesn't support the influx
-			// query, just continue without it.
-			responseIdx--
-			unknownRetentionPolicyPresent = false
+		// policy is always in this location.
+		if errs[responseIdx] == nil {
+			// The only time we don't use the special source is if
+			// there are backend influx servers AND the special source
+			// doesn't support the query.
+			if len(responsesToMerge) == 0 || !isUnsupportedError(responseList[responseIdx].Error()) {
+				specialResponse = responseList[responseIdx]
+			}
+		} else {
+			logger.Println(errs[responseIdx])
+			lastErrorEncountered = errs[responseIdx]
 		}
 	}
-	for _, err := range errs[:responseIdx] {
+	// If we reached ordinary influx servers with known retention policy,
+	// merge those results and then merge the response from the special
+	// source with unknown retention policy last.
+	if len(responsesToMerge) != 0 {
+		mergedResponse, err := responses.Merge(responsesToMerge...)
 		if err != nil {
 			return nil, err
 		}
-	}
-	if unknownRetentionPolicyPresent {
-		mergedResponse, err := responses.Merge(
-			responseList[:responseIdx-1]...)
-		if err != nil {
-			return nil, err
+		if specialResponse != nil {
+			return responses.MergePreferred(mergedResponse, specialResponse)
 		}
-		return responses.MergePreferred(
-			mergedResponse, responseList[responseIdx-1])
+		return mergedResponse, nil
 	}
-	return responses.Merge(responseList[:responseIdx]...)
+	// We only have the source with unknown retention policy, return as-is
+	if specialResponse != nil {
+		return specialResponse, nil
+	}
+	return nil, lastErrorEncountered
 }
 
 func (e *executerType) set(instances instanceList) {
