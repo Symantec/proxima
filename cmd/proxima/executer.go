@@ -23,6 +23,10 @@ var (
 	errNoBackends = errors.New("No backends available to serve query. Check the configuration file.")
 )
 
+var (
+	kInfluxTricorderPath = "/proc/influx"
+)
+
 // Single influx instance
 type instance struct {
 	Cl client.Client
@@ -152,8 +156,8 @@ func (e *executerType) SetupWithStream(r io.Reader) error {
 }
 
 func registerMetrics(cluster *config.Cluster) error {
-	tricorder.UnregisterPath("/proc/servers")
-	influxDir, err := tricorder.RegisterDirectory("/proc/influx")
+	tricorder.UnregisterPath(kInfluxTricorderPath)
+	influxDir, err := tricorder.RegisterDirectory(kInfluxTricorderPath)
 	if err != nil {
 		return err
 	}
