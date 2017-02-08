@@ -88,11 +88,11 @@ func main() {
 	select {
 	case readCloser := <-changeCh:
 		if err := executer.SetupWithStream(readCloser); err != nil {
-			logger.Fatal(err)
+			logger.Println(err)
 		}
 		readCloser.Close()
 	case <-time.After(time.Second):
-		logger.Fatal("No config file")
+		logger.Println("No config file initially")
 	}
 	go func() {
 		for readCloser := range changeCh {
