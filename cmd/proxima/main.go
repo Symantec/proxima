@@ -7,6 +7,7 @@ import (
 	"github.com/Symantec/Dominator/lib/logbuf"
 	"github.com/Symantec/proxima/cmd/proxima/splash"
 	"github.com/Symantec/scotty/lib/apiutil"
+	"github.com/Symantec/tricorder/go/healthserver"
 	"github.com/Symantec/tricorder/go/tricorder"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/uuid"
@@ -136,6 +137,7 @@ func main() {
 			}
 		}(port)
 	}
+	healthserver.SetReady()
 	if err := http.ListenAndServe(":"+fPorts[0], nil); err != nil {
 		log.Fatal(err)
 	}
