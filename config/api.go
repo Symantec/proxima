@@ -1,3 +1,5 @@
+// Package config contains the datastructures representing the configuration
+// of proxima.
 package config
 
 import (
@@ -5,7 +7,6 @@ import (
 	"time"
 )
 
-// Instance represents a single influx instance
 type Instance struct {
 	// http://someHost.com:1234.
 	HostAndPort string `yaml:"hostAndPort"`
@@ -22,7 +23,6 @@ func (i *Instance) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return yamlutil.StrictUnmarshalYAML(unmarshal, (*instanceFields)(i))
 }
 
-// Cluster represents a group of influx instances
 type Cluster struct {
 	// The instances
 	Instances []Instance `yaml:"instances"`
@@ -35,4 +35,81 @@ func (c *Cluster) Reset() {
 func (c *Cluster) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	type clusterFields Cluster
 	return yamlutil.StrictUnmarshalYAML(unmarshal, (*clusterFields)(c))
+}
+
+// Influx represents a single influx backend.
+type Influx struct {
+	// http://someHost.com:1234.
+	HostAndPort string `yaml:"hostAndPort"`
+	// The duration in this instance's retention policy
+	Duration time.Duration `yaml:"duration"`
+	// The influx Database to use
+	Database string `yaml:"database"`
+}
+
+func (i *Influx) UnmarshalYAML(
+	unmarshal func(interface{}) error) error {
+	type influxFields Influx
+	return yamlutil.StrictUnmarshalYAML(unmarshal, (*influxFields)(i))
+}
+
+// InfluxList represents a group of influx backends.
+// InfluxList instances are to be treated as immutable.
+type InfluxList []Influx
+
+// Order returns an InfluxList like this one but ordered by duration
+// in descending order
+func (i InfluxList) Order() InfluxList {
+	result := make(InfluxList, len(i))
+	copy(result, i)
+	orderInfluxes(result)
+	return result
+}
+
+// Scotty represents a single scotty server.
+type Scotty struct {
+	// http://someHost.com:1234.
+	HostAndPort string `yaml:"hostAndPort"`
+}
+
+func (s *Scotty) UnmarshalYAML(
+	unmarshal func(interface{}) error) error {
+	type scottyFields Scotty
+	return yamlutil.StrictUnmarshalYAML(unmarshal, (*scottyFields)(s))
+}
+
+// ScottyList represents a group of scotty servers.
+// ScottyList instances are to be treated as immutable.
+type ScottyList []Scotty
+
+// Database represents a single named configuration within proxima.
+type Database struct {
+	// Name of configuration
+	Name string `yaml:"name"`
+	// The influx backends
+	Influxes InfluxList `yaml:"influxes"`
+	// The scotty servers
+	Scotties ScottyList `yaml:"scotties"`
+}
+
+func (d *Database) UnmarshalYAML(
+	unmarshal func(interface{}) error) error {
+	type databaseFields Database
+	return yamlutil.StrictUnmarshalYAML(unmarshal, (*databaseFields)(d))
+}
+
+// Proxima represents the configuration of proxima. This is what is read
+// from the configuration file using the yamlutil package.
+type Proxima struct {
+	Dbs []Database `yaml:"databases"`
+}
+
+func (p *Proxima) Reset() {
+	*p = Proxima{}
+}
+
+func (p *Proxima) UnmarshalYAML(
+	unmarshal func(interface{}) error) error {
+	type proximaFields Proxima
+	return yamlutil.StrictUnmarshalYAML(unmarshal, (*proximaFields)(p))
 }
