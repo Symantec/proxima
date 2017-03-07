@@ -6,15 +6,18 @@ import (
 	"github.com/Symantec/Dominator/lib/fsutil"
 	"github.com/Symantec/Dominator/lib/logbuf"
 	"github.com/Symantec/proxima/cmd/proxima/splash"
+	"github.com/Symantec/scotty/influx/responses"
 	"github.com/Symantec/scotty/lib/apiutil"
 	"github.com/Symantec/tricorder/go/healthserver"
 	"github.com/Symantec/tricorder/go/tricorder"
+	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/uuid"
 	"log"
 	"net/http"
 	"net/rpc"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -53,27 +56,56 @@ type resultListType struct {
 func performQuery(
 	executer *executerType,
 	logger *log.Logger,
-	query, db, epoch string) (*resultListType, error) {
-	resp, err := executer.Query(logger, query, db, epoch)
-	if err == nil {
-		err = resp.Error()
-	}
-	if err != nil {
-		return nil, err
-	}
-	results := &resultListType{
-		Results: make([]seriesListType, len(resp.Results)),
-	}
-	for i := range results.Results {
-		theSeries := resp.Results[i].Series
-		if theSeries == nil {
-			theSeries = []models.Row{}
+	query, db, epoch string) (interface{}, error) {
+	switch strings.ToUpper(query) {
+	case "SHOW MEASUREMENTS LIMIT 1":
+		return responses.Serialise(&client.Response{
+			Results: []client.Result{
+				{
+					Series: []models.Row{
+						{
+							Name:    "measurements",
+							Columns: []string{"name"},
+							Values:  [][]interface{}{{"aname"}},
+						},
+					},
+				},
+			},
+		})
+	case "SHOW DATABASES":
+		dbNames := executer.Names()
+		values := make([][]interface{}, len(dbNames))
+		for i := range dbNames {
+			values[i] = []interface{}{dbNames[i]}
 		}
-		results.Results[i] = seriesListType{
-			Series: theSeries,
+		return responses.Serialise(&client.Response{
+			Results: []client.Result{
+				{
+					Series: []models.Row{
+						{
+							Name:    "databases",
+							Columns: []string{"name"},
+							Values:  values,
+						},
+					},
+				},
+			},
+		})
+	default:
+		resp, err := executer.Query(logger, query, db, epoch)
+		if err != nil {
+			return nil, err
 		}
+		return responses.Serialise(resp)
 	}
-	return results, nil
+}
+
+func dateHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setHeader(w, r, "Date", time.Now().UTC().Format("Mon, 2 Jan 2006 15:04:05 MST"))
+		w.WriteHeader(204)
+	})
+
 }
 
 func main() {
@@ -107,6 +139,10 @@ func main() {
 		&splash.Handler{
 			Log: circularBuffer,
 		})
+	http.Handle(
+		"/ping",
+		uuidHandler(dateHandler()),
+	)
 	http.Handle(
 		"/query",
 		uuidHandler(
