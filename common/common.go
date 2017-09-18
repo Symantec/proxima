@@ -1,12 +1,14 @@
 package common
 
 import (
+	"errors"
 	"fmt"
 	"github.com/Symantec/proxima/config"
 	"github.com/Symantec/scotty/influx/qlutils"
 	"github.com/Symantec/scotty/influx/responses"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
+	"github.com/influxdata/influxdb/models"
 	"log"
 	"sort"
 	"sync"
@@ -28,14 +30,18 @@ func (l *lastErrorType) Error() error {
 }
 
 type queryerType interface {
-	Query(q, epoch string) (*client.Response, error)
+	Query(l *log.Logger, q *influxql.Query, epoch string) (
+		*client.Response, error)
 }
 
+// handleType represents a concrete server. Either a scotty or an influx db.
+// This interface exists to enable testing.
 type handleType interface {
 	Query(queryStr, database, epoch string) (*client.Response, error)
 	Close() error
 }
 
+// Real implementation of handleType
 type influxHandleType struct {
 	cl client.Client
 }
@@ -50,8 +56,11 @@ func (q *influxHandleType) Close() error {
 	return q.cl.Close()
 }
 
+// Type is here for testing. Tests have a function that creates a mock
+// handleType.
 type handleCreaterType func(addr string) (handleType, error)
 
+// Creates a *real* handleType given a host and port
 func influxCreateHandle(addr string) (handleType, error) {
 	cl, err := client.NewHTTPClient(client.HTTPConfig{Addr: addr})
 	if err != nil {
@@ -60,19 +69,23 @@ func influxCreateHandle(addr string) (handleType, error) {
 	return &influxHandleType{cl: cl}, nil
 }
 
-func getConcurrentResponses(
+// getRawConcurrentResponses does multiple querying concurrently.
+// queries and endpoints must be the same length. Elements in queries
+// correspond to elements in endpoints 1 for 1.  The returned responseList
+// and errs are the same length as endpoints and queries.
+func getRawConcurrentResponses(
 	endpoints []queryerType,
 	queries []*influxql.Query,
 	epoch string,
 	logger *log.Logger) (
-	*client.Response, error) {
+	responseList []*client.Response, errs []error) {
 	if len(endpoints) != len(queries) {
 		panic("endpoints and queries parameters must have same length")
 	}
 	// These are placeholders for the response and error from each influx db
 	// instance.
-	responseList := make([]*client.Response, len(queries))
-	errs := make([]error, len(queries))
+	responseList = make([]*client.Response, len(queries))
+	errs = make([]error, len(queries))
 
 	var wg sync.WaitGroup
 	for i, query := range queries {
@@ -83,17 +96,31 @@ func getConcurrentResponses(
 		wg.Add(1)
 		go func(
 			n queryerType,
-			query string,
+			query *influxql.Query,
 			responseHere **client.Response,
 			errHere *error) {
-			*responseHere, *errHere = n.Query(query, epoch)
+			*responseHere, *errHere = n.Query(logger, query, epoch)
 			wg.Done()
 		}(endpoints[i],
-			query.String(),
+			query,
 			&responseList[i],
 			&errs[i])
 	}
 	wg.Wait()
+	return
+}
+
+// getConcurrentResponses performs queries on different endpoints for
+// different time ranges concurrently and merges all the results together.
+// queries and endpoints must be of the same length. Each element in queries
+// should be the same with the exception of the time range.
+func getConcurrentResponses(
+	endpoints []queryerType,
+	queries []*influxql.Query,
+	epoch string,
+	logger *log.Logger) (*client.Response, error) {
+	responseList, errs := getRawConcurrentResponses(
+		endpoints, queries, epoch, logger)
 
 	// These will be the responses from influx servers that we merge
 	var responsesToMerge []*client.Response
@@ -165,6 +192,9 @@ func (l *InfluxList) _close() error {
 	return lastError.Error()
 }
 
+// splitQuery takes a query and splits it up by time range according to the
+// retention policy of each influx server in this instance. The returned
+// slice is the same length as the number of influx servers in this instance.
 func (l *InfluxList) splitQuery(
 	query *influxql.Query, now time.Time) (
 	splitQueries []*influxql.Query,
@@ -210,11 +240,98 @@ func (l *InfluxList) query(
 
 func newScottyForTesting(
 	scotty config.Scotty, creater handleCreaterType) (*Scotty, error) {
-	handle, err := creater(scotty.HostAndPort)
-	if err != nil {
-		return nil, err
+	if scotty.HostAndPort != "" {
+		handle, err := creater(scotty.HostAndPort)
+		if err != nil {
+			return nil, err
+		}
+		return &Scotty{handle: handle}, nil
 	}
-	return &Scotty{data: scotty, handle: handle}, nil
+	if len(scotty.Partials) != 0 {
+		partials, err := newScottyPartialsForTesting(scotty.Partials, creater)
+		if err != nil {
+			return nil, err
+		}
+		return &Scotty{partials: partials}, nil
+	}
+	if len(scotty.Scotties) != 0 {
+		scotties, err := newScottyListForTesting(scotty.Scotties, creater)
+		if err != nil {
+			return nil, err
+		}
+		return &Scotty{scotties: scotties}, nil
+	}
+	return nil, errors.New("Scotty must have either hostAndPort, partials, or scotties")
+}
+
+func (s *Scotty) query(
+	logger *log.Logger, query *influxql.Query, epoch string) (
+	*client.Response, error) {
+	switch {
+	case s.handle != nil:
+		return s.handle.Query(query.String(), "scotty", epoch)
+	case s.partials != nil:
+		return s.partials.Query(logger, query, epoch)
+	case s.scotties != nil:
+		return s.scotties.Query(logger, query, epoch)
+	}
+	// Should never get here.
+	panic("query should return something")
+}
+
+func (s *Scotty) _close() error {
+	if s.handle != nil {
+		return s.handle.Close()
+	}
+	if s.partials != nil {
+		return s.partials.Close()
+	}
+	if s.scotties != nil {
+		return s.scotties.Close()
+	}
+	return nil
+}
+
+func newScottyPartialsForTesting(
+	scotties config.ScottyList, creater handleCreaterType) (
+	*ScottyPartials, error) {
+	if len(scotties) == 0 {
+		panic("Scotty list must be non-empty")
+	}
+	result := &ScottyPartials{instances: make([]*Scotty, len(scotties))}
+	for i := range scotties {
+		var err error
+		result.instances[i], err = newScottyForTesting(scotties[i], creater)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (l *ScottyPartials) _close() error {
+	if l == nil {
+		return nil
+	}
+	var lastError lastErrorType
+	for _, s := range l.instances {
+		lastError.Add(s.Close())
+	}
+	return lastError.Error()
+}
+
+func (l *ScottyPartials) query(
+	logger *log.Logger, query *influxql.Query, epoch string) (
+	*client.Response, error) {
+	endpoints := make([]queryerType, len(l.instances))
+	for i := range endpoints {
+		endpoints[i] = l.instances[i]
+	}
+	queries := make([]*influxql.Query, len(l.instances))
+	for i := range queries {
+		queries[i] = query
+	}
+	return aggregateScottyResponses(endpoints, query, epoch, logger)
 }
 
 func newScottyListForTesting(
@@ -329,6 +446,7 @@ func (d *Database) query(
 	if err := lastError.Error(); err != nil {
 		return nil, err
 	}
+	// Give scotty results preference
 	return responses.MergePreferred(influxResponse, scottyResponse)
 }
 
@@ -363,4 +481,131 @@ func (p *Proxima) _close() error {
 		lastError.Add(db.Close())
 	}
 	return lastError.Error()
+}
+
+// sumUpScottyResponses issues a sum or count statement to all the scotties
+// in endpoints and sums the results into a single row set.
+func sumUpScottyResponses(
+	endpoints []queryerType,
+	stmt influxql.Statement,
+	epoch string,
+	logger *log.Logger) (result []models.Row, err error) {
+	queries := make([]*influxql.Query, len(endpoints))
+	query := qlutils.SingleQuery(stmt)
+	for i := range queries {
+		queries[i] = query
+	}
+	responseList, errs := getRawConcurrentResponses(
+		endpoints, queries, epoch, logger)
+
+	// If we get an error from any scotty, we might give a wrong answer
+	// so the best we can do is error out.
+	for i := range errs {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		if err := responseList[i].Error(); err != nil {
+			return nil, err
+		}
+	}
+	rowsFromResponses := make([][]models.Row, len(responseList))
+	for i := range rowsFromResponses {
+		rowsFromResponses[i], err = responses.ExtractRows(responseList[i])
+		if err != nil {
+			return
+		}
+	}
+	return responses.SumRowsTogether(rowsFromResponses...)
+}
+
+// aggregateScottyStmtResponses aggregates scotty responses together when each
+// scotty represents different data. The statement is very restricted. For
+// instance, it can only be a sum(), mean() or count() statement.
+func aggregateScottyStmtResponses(
+	endpoints []queryerType,
+	stmt influxql.Statement,
+	epoch string,
+	logger *log.Logger) (result client.Result, err error) {
+	aggregationType, err := qlutils.AggregationType(stmt)
+	if err != nil {
+		return
+	}
+	// If it is a mean statement, issue the corresponding sum statement and
+	// count statement to the scotties. Then do the math to compute the mean
+	// ourselves.
+	if aggregationType == "mean" {
+		var sumStmt, cntStmt influxql.Statement
+		sumStmt, err = qlutils.WithAggregationType(stmt, "sum")
+		if err != nil {
+			return
+		}
+		cntStmt, err = qlutils.WithAggregationType(stmt, "count")
+		if err != nil {
+			return
+		}
+		var sumRows, cntRows []models.Row
+		// Sum the results of the sum statement from each scotty
+		sumRows, err = sumUpScottyResponses(
+			endpoints,
+			sumStmt,
+			epoch,
+			logger)
+		if err != nil {
+			return
+		}
+		// Sum the results of the count statement from each scotty
+		cntRows, err = sumUpScottyResponses(
+			endpoints,
+			cntStmt,
+			epoch,
+			logger)
+		if err != nil {
+			return
+		}
+		// compute the mean ourselves
+		var meanRows []models.Row
+		meanRows, err = responses.DivideRows(
+			sumRows, cntRows, []string{"time", "mean"})
+		if err != nil {
+			return
+		}
+		return client.Result{Series: meanRows}, nil
+	} else if aggregationType == "sum" || aggregationType == "count" {
+		// If it is a sum or count statement we issue it to all the scotties
+		// as is and sum up the results.
+		var rows []models.Row
+		rows, err = sumUpScottyResponses(
+			endpoints,
+			stmt,
+			epoch,
+			logger)
+		if err != nil {
+			return
+		}
+		return client.Result{Series: rows}, nil
+	} else {
+		err = errors.New("Only sum, count, mean queries are supported")
+		return
+	}
+
+}
+
+// aggregateScottyResponses aggregates scotty responses together when each
+// scotty represents different data. The query is very restricted. For
+// instance, it can contain only sum(), mean() or count() statements.
+func aggregateScottyResponses(
+	endpoints []queryerType,
+	query *influxql.Query,
+	epoch string,
+	logger *log.Logger) (*client.Response, error) {
+	var results []client.Result
+	for _, stmt := range query.Statements {
+		result, err := aggregateScottyStmtResponses(
+			endpoints, stmt, epoch, logger)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return &client.Response{Results: results}, nil
 }

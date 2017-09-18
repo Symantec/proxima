@@ -20,8 +20,9 @@ func NewInflux(influx config.Influx) (*Influx, error) {
 }
 
 // Query runs a query against this backend.
-func (d *Influx) Query(queryStr, epoch string) (*client.Response, error) {
-	return d.handle.Query(queryStr, d.data.Database, epoch)
+func (d *Influx) Query(
+	logger *log.Logger, query *influxql.Query, epoch string) (*client.Response, error) {
+	return d.handle.Query(query.String(), d.data.Database, epoch)
 }
 
 // Close frees any resources associated with this instance.
@@ -56,25 +57,54 @@ func (l *InfluxList) Close() error {
 
 // Scotty represents a single scotty server.
 type Scotty struct {
-	data   config.Scotty
+	// connects to a particular scotty. Only one of these fields will be
+	// non nil
 	handle handleType
+
+	// Scotties which all together represent the data
+	partials *ScottyPartials
+
+	// Each scotty represents the same data.
+	scotties *ScottyList
 }
 
 func NewScotty(scotty config.Scotty) (*Scotty, error) {
 	return newScottyForTesting(scotty, influxCreateHandle)
 }
 
-// Query runs a query against this scotty server.
-func (s *Scotty) Query(queryStr, epoch string) (*client.Response, error) {
-	return s.handle.Query(queryStr, "scotty", epoch)
+func (s *Scotty) Query(
+	logger *log.Logger, query *influxql.Query, epoch string) (
+	*client.Response, error) {
+	return s.query(logger, query, epoch)
 }
 
 // Close frees any resources associated with this instance.
 func (s *Scotty) Close() error {
-	return s.handle.Close()
+	return s._close()
 }
 
-// ScottyList represents a group of scotty servers.
+// ScottyPartials represents a list of scotties where all the scotties
+// together represent the data. All scotties must respond to each query.
+type ScottyPartials struct {
+	instances []*Scotty
+}
+
+func NewScottyPartials(scotties config.ScottyList) (*ScottyPartials, error) {
+	return newScottyPartialsForTesting(scotties, influxCreateHandle)
+}
+
+func (l *ScottyPartials) Query(
+	logger *log.Logger, query *influxql.Query, epoch string) (
+	*client.Response, error) {
+	return l.query(logger, query, epoch)
+}
+
+func (l *ScottyPartials) Close() error {
+	return l._close()
+}
+
+// ScottyList represents a group of scotty servers. Unlike ScottyPartials,
+// each Scotty has the same data only one scotty has to respond to each query.
 // nil represents the group of zero scotty servers.
 type ScottyList struct {
 	instances []*Scotty

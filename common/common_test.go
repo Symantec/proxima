@@ -9,6 +9,7 @@ import (
 	"github.com/influxdata/influxdb/models"
 	. "github.com/smartystreets/goconvey/convey"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,13 +25,29 @@ type queryCallType struct {
 	epoch    string
 }
 
+type fakeResponseType struct {
+	Response *client.Response
+	Err      error
+}
+
 // fakeHandleType represents a connection to a fake influx backend or
 // scotty server.
 type fakeHandleType struct {
-	queryCalls    []queryCallType
+	queryCalls []queryCallType
+
+	byQuery       map[string]fakeResponseType
 	queryResponse *client.Response
 	queryError    error
 	closed        bool
+}
+
+func (f *fakeHandleType) WhenQueryIsReturn(
+	query string, response *client.Response, err error) {
+	if f.byQuery == nil {
+		f.byQuery = make(map[string]fakeResponseType)
+	}
+	f.byQuery[strings.ToLower(query)] = fakeResponseType{
+		Response: response, Err: err}
 }
 
 // WhenQueriedReturn instructs this fake to return a particular response
@@ -82,6 +99,13 @@ func (f *fakeHandleType) Query(queryStr, database, epoch string) (
 			database: database,
 			epoch:    epoch,
 		})
+	response, ok := f.byQuery[strings.ToLower(queryStr)]
+	if ok {
+		return response.Response, response.Err
+	}
+	if f.queryResponse == nil && f.queryError == nil {
+		panic("Unexpected query string: " + queryStr)
+	}
 	return f.queryResponse, f.queryError
 }
 
@@ -140,6 +164,308 @@ func newResponse(values ...int64) *client.Response {
 		},
 	}
 
+}
+
+func TestScottyPartial(t *testing.T) {
+	Convey("Given fake sources", t, func() {
+		now := time.Date(2017, 5, 13, 19, 0, 0, 0, time.UTC)
+		store := handleStoreType{
+			"alpha": &fakeHandleType{},
+			"bravo": &fakeHandleType{},
+			"error": &fakeHandleType{},
+		}
+		store["error"].WhenQueriedReturn(nil, kErrSomeError)
+		store["alpha"].WhenQueryIsReturn(
+			"select sum(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("45")},
+									{json.Number("11050"), json.Number("75")},
+									{json.Number("11100"), nil},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("2")},
+									{json.Number("11050"), json.Number("8")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["alpha"].WhenQueryIsReturn(
+			"select count(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("5")},
+									{json.Number("11050"), json.Number("3")},
+									{json.Number("11100"), nil},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("4")},
+									{json.Number("11050"), json.Number("2")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["bravo"].WhenQueryIsReturn(
+			"select sum(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("27")},
+									{json.Number("11050"), json.Number("20")},
+									{json.Number("11100"), json.Number("21")},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("3")},
+									{json.Number("11050"), json.Number("7")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["bravo"].WhenQueryIsReturn(
+			"select count(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("1")},
+									{json.Number("11050"), json.Number("2")},
+									{json.Number("11100"), json.Number("3")},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("1")},
+									{json.Number("11050"), json.Number("1")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+
+		Convey("An error from one scotty should result in an error", func() {
+			proximaConfig := config.Proxima{
+				Dbs: []config.Database{
+					{
+						Name: "regular",
+						Scotties: config.ScottyList{
+							{
+								Partials: config.ScottyList{
+									{HostAndPort: "alpha"},
+									{HostAndPort: "error"},
+								},
+							},
+						},
+					},
+				},
+			}
+			proxima, err := newProximaForTesting(proximaConfig, store.Create)
+			So(err, ShouldBeNil)
+			db := proxima.ByName("regular")
+			So(db, ShouldNotBeNil)
+			query, err := qlutils.NewQuery(
+				"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
+			So(err, ShouldBeNil)
+			_, err = db.Query(nil, query, "ns", now)
+			So(err, ShouldEqual, kErrSomeError)
+		})
+
+		Convey("With good config", func() {
+			proximaConfig := config.Proxima{
+				Dbs: []config.Database{
+					{
+						Name: "regular",
+						Scotties: config.ScottyList{
+							{
+								Partials: config.ScottyList{
+									{HostAndPort: "alpha"},
+									{HostAndPort: "bravo"},
+								},
+							},
+						},
+					},
+				},
+			}
+			// Create a proxima instance that uses our fakes rather than
+			// connecting to real influx backends and scotty servers.
+			proxima, err := newProximaForTesting(proximaConfig, store.Create)
+			So(err, ShouldBeNil)
+			Convey("Close should free resources", func() {
+				So(proxima.Close(), ShouldBeNil)
+				So(store["alpha"].Closed(), ShouldBeTrue)
+				So(store["bravo"].Closed(), ShouldBeTrue)
+			})
+			Convey("Running sum group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(nil, query, "ns", now)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "sum"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("5")},
+										{json.Number("11050"), json.Number("15")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "sum"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("72")},
+										{json.Number("11050"), json.Number("95")},
+										{json.Number("11100"), json.Number("21")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+			Convey("Running count group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select count(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(nil, query, "ns", now)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "count"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("5")},
+										{json.Number("11050"), json.Number("3")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "count"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("6")},
+										{json.Number("11050"), json.Number("5")},
+										{json.Number("11100"), json.Number("3")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+			Convey("Running mean group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select mean(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(nil, query, "ns", now)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "mean"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("1")},
+										{json.Number("11050"), json.Number("5")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "mean"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("12")},
+										{json.Number("11050"), json.Number("19")},
+										{json.Number("11100"), json.Number("7")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+		})
+
+	})
 }
 
 func TestAPI(t *testing.T) {

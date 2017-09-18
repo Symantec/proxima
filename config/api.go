@@ -36,10 +36,17 @@ func (i InfluxList) Order() InfluxList {
 	return result
 }
 
-// Scotty represents a single scotty server.
+// Scotty represents a single scotty server, a list of redundant scotty
+// servers each having the same data, or a list of scotty servers where
+// each scotty server has different data. One and only one of the fields
+// must be filled in.
 type Scotty struct {
 	// http://someHost.com:1234.
 	HostAndPort string `yaml:"hostAndPort"`
+	// Scotty servers have the same data
+	Scotties ScottyList `yaml:"scotties"`
+	// Scotty servers have different data
+	Partials ScottyList `yaml:"partials"`
 }
 
 func (s *Scotty) UnmarshalYAML(
