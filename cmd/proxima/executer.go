@@ -122,19 +122,34 @@ func registerInfluxes(
 
 func registerScotty(
 	scotty config.Scotty, dir *tricorder.DirectorySpec) error {
-	if err := dir.RegisterMetric(
-		"endpoint",
-		&scotty.HostAndPort,
-		units.None,
-		"endpoint of scotty server"); err != nil {
-		return err
+	if scotty.HostAndPort != "" {
+		if err := dir.RegisterMetric(
+			"endpoint",
+			&scotty.HostAndPort,
+			units.None,
+			"endpoint of scotty server"); err != nil {
+			return err
+		}
+		return nil
 	}
-	return nil
+	if len(scotty.Partials) != 0 {
+		if err := registerScotties(scotty.Partials, "partials", dir); err != nil {
+			return err
+		}
+		return nil
+	}
+	if len(scotty.Scotties) != 0 {
+		if err := registerScotties(scotty.Scotties, "scotties", dir); err != nil {
+			return err
+		}
+		return nil
+	}
+	return errors.New("Scotty must have hostAndPort, partials, or scotties")
 }
 
 func registerScotties(
-	scotties []config.Scotty, dir *tricorder.DirectorySpec) error {
-	scottiesDir, err := dir.RegisterDirectory("scotties")
+	scotties []config.Scotty, name string, dir *tricorder.DirectorySpec) error {
+	scottiesDir, err := dir.RegisterDirectory(name)
 	if err != nil {
 		return err
 	}
@@ -159,7 +174,7 @@ func registerDatabase(
 	if err := registerInfluxes(db.Influxes, databaseDir); err != nil {
 		return err
 	}
-	if err := registerScotties(db.Scotties, databaseDir); err != nil {
+	if err := registerScotties(db.Scotties, "scotties", databaseDir); err != nil {
 		return err
 	}
 	return nil
