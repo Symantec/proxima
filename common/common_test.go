@@ -9,13 +9,14 @@ import (
 	"github.com/influxdata/influxdb/models"
 	. "github.com/smartystreets/goconvey/convey"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
 
 var (
-	kErrCreatingHandle = errors.New("common:Error creating handle")
-	kErrSomeError      = errors.New("common:some error")
+	kErrCreatingDbQueryer = errors.New("common:Error creating DbQueryer")
+	kErrSomeError         = errors.New("common:some error")
 )
 
 type queryCallType struct {
@@ -24,19 +25,35 @@ type queryCallType struct {
 	epoch    string
 }
 
-// fakeHandleType represents a connection to a fake influx backend or
+type fakeResponseType struct {
+	Response *client.Response
+	Err      error
+}
+
+// fakeDbQueryerType represents a connection to a fake influx backend or
 // scotty server.
-type fakeHandleType struct {
-	queryCalls    []queryCallType
+type fakeDbQueryerType struct {
+	queryCalls []queryCallType
+
+	byQuery       map[string]fakeResponseType
 	queryResponse *client.Response
 	queryError    error
 	closed        bool
 }
 
+func (f *fakeDbQueryerType) WhenQueryIsReturn(
+	query string, response *client.Response, err error) {
+	if f.byQuery == nil {
+		f.byQuery = make(map[string]fakeResponseType)
+	}
+	f.byQuery[strings.ToLower(query)] = fakeResponseType{
+		Response: response, Err: err}
+}
+
 // WhenQueriedReturn instructs this fake to return a particular response
 // or error when queried. This fake always returns this same response
 // regardless of the actual query.
-func (f *fakeHandleType) WhenQueriedReturn(
+func (f *fakeDbQueryerType) WhenQueriedReturn(
 	response *client.Response, err error) {
 	f.queryResponse, f.queryError = response, err
 }
@@ -46,7 +63,7 @@ func (f *fakeHandleType) WhenQueriedReturn(
 // and the epoch, the precision of the times e.g "ns", "ms", "s", etc.
 // If previous NextQuery calls have already returned all the queries made
 // against this fake, NextQuery panics.
-func (f *fakeHandleType) NextQuery() (
+func (f *fakeDbQueryerType) NextQuery() (
 	query, database, epoch string) {
 	query = f.queryCalls[0].query
 	database = f.queryCalls[0].database
@@ -58,22 +75,22 @@ func (f *fakeHandleType) NextQuery() (
 }
 
 // NoMoreQueries returns true if NextQuery would panic.
-func (f *fakeHandleType) NoMoreQueries() bool {
+func (f *fakeDbQueryerType) NoMoreQueries() bool {
 	return len(f.queryCalls) == 0
 }
 
 // Closed returns true if Close was called on this fake
-func (f *fakeHandleType) Closed() bool {
+func (f *fakeDbQueryerType) Closed() bool {
 	return f.closed
 }
 
 // Query sends a query to the fake influx or scotty server, records the
 // query sent, and returns the same response and error passed to
 // WhenQueriedReturn.
-func (f *fakeHandleType) Query(queryStr, database, epoch string) (
+func (f *fakeDbQueryerType) Query(queryStr, database, epoch string) (
 	*client.Response, error) {
 	if f.closed {
-		panic("Cannot query a closed handle")
+		panic("Cannot query a closed dbQueryer")
 	}
 	f.queryCalls = append(
 		f.queryCalls,
@@ -82,30 +99,37 @@ func (f *fakeHandleType) Query(queryStr, database, epoch string) (
 			database: database,
 			epoch:    epoch,
 		})
+	response, ok := f.byQuery[strings.ToLower(queryStr)]
+	if ok {
+		return response.Response, response.Err
+	}
+	if f.queryResponse == nil && f.queryError == nil {
+		panic("Unexpected query string: " + queryStr)
+	}
 	return f.queryResponse, f.queryError
 }
 
 // Close closes the connection to the fake influx or scotty server.
-func (f *fakeHandleType) Close() error {
+func (f *fakeDbQueryerType) Close() error {
 	f.closed = true
 	return nil
 }
 
-// handleStoreType is a collection of fake influx backends and scotty servers
+// dbQueryerStoreType is a collection of fake influx backends and scotty servers
 // keyed by their host and port.
-type handleStoreType map[string]*fakeHandleType
+type dbQueryerStoreType map[string]*fakeDbQueryerType
 
 // Create returns the connection to the fake server given its host and port.
-func (s handleStoreType) Create(addr string) (handleType, error) {
+func (s dbQueryerStoreType) Create(addr string) (dbQueryerType, error) {
 	result, ok := s[addr]
 	if !ok {
-		return nil, kErrCreatingHandle
+		return nil, kErrCreatingDbQueryer
 	}
 	return result, nil
 }
 
 // AllClose returns true if all connections to all fakes have been closed.
-func (s handleStoreType) AllClosed() bool {
+func (s dbQueryerStoreType) AllClosed() bool {
 	for _, h := range s {
 		if !h.Closed() {
 			return false
@@ -142,20 +166,322 @@ func newResponse(values ...int64) *client.Response {
 
 }
 
+func TestScottyPartial(t *testing.T) {
+	Convey("Given fake sources", t, func() {
+		now := time.Date(2017, 5, 13, 19, 0, 0, 0, time.UTC)
+		store := dbQueryerStoreType{
+			"alpha": &fakeDbQueryerType{},
+			"bravo": &fakeDbQueryerType{},
+			"error": &fakeDbQueryerType{},
+		}
+		store["error"].WhenQueriedReturn(nil, kErrSomeError)
+		store["alpha"].WhenQueryIsReturn(
+			"select sum(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("45")},
+									{json.Number("11050"), json.Number("75")},
+									{json.Number("11100"), nil},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("2")},
+									{json.Number("11050"), json.Number("8")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["alpha"].WhenQueryIsReturn(
+			"select count(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("5")},
+									{json.Number("11050"), json.Number("3")},
+									{json.Number("11100"), nil},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("4")},
+									{json.Number("11050"), json.Number("2")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["bravo"].WhenQueryIsReturn(
+			"select sum(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("27")},
+									{json.Number("11050"), json.Number("20")},
+									{json.Number("11100"), json.Number("21")},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "sum"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("3")},
+									{json.Number("11050"), json.Number("7")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+		store["bravo"].WhenQueryIsReturn(
+			"select count(value) from load where time > '2017-05-13T18:00:00Z' group by time(1m), appname",
+			&client.Response{
+				Results: []client.Result{
+					{
+						Series: []models.Row{
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "subd"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("1")},
+									{json.Number("11050"), json.Number("2")},
+									{json.Number("11100"), json.Number("3")},
+								},
+							},
+							{
+								Name:    "load",
+								Tags:    map[string]string{"appname": "imgserver"},
+								Columns: []string{"time", "count"},
+								Values: [][]interface{}{
+									{json.Number("11000"), json.Number("1")},
+									{json.Number("11050"), json.Number("1")},
+									{json.Number("11100"), nil},
+								},
+							},
+						},
+					},
+				},
+			},
+			nil)
+
+		Convey("An error from one scotty should result in an error", func() {
+			proximaConfig := config.Proxima{
+				Dbs: []config.Database{
+					{
+						Name: "regular",
+						Scotties: config.ScottyList{
+							{
+								Partials: config.ScottyList{
+									{HostAndPort: "alpha"},
+									{HostAndPort: "error"},
+								},
+							},
+						},
+					},
+				},
+			}
+			proxima, err := newProximaForTesting(proximaConfig, store.Create)
+			So(err, ShouldBeNil)
+			db := proxima.ByName("regular")
+			So(db, ShouldNotBeNil)
+			query, err := qlutils.NewQuery(
+				"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
+			So(err, ShouldBeNil)
+			_, err = db.Query(query, "ns", now, nil)
+			So(err, ShouldEqual, kErrSomeError)
+		})
+
+		Convey("With good config", func() {
+			proximaConfig := config.Proxima{
+				Dbs: []config.Database{
+					{
+						Name: "regular",
+						Scotties: config.ScottyList{
+							{
+								Partials: config.ScottyList{
+									{HostAndPort: "alpha"},
+									{HostAndPort: "bravo"},
+								},
+							},
+						},
+					},
+				},
+			}
+			// Create a proxima instance that uses our fakes rather than
+			// connecting to real influx backends and scotty servers.
+			proxima, err := newProximaForTesting(proximaConfig, store.Create)
+			So(err, ShouldBeNil)
+			Convey("Close should free resources", func() {
+				So(proxima.Close(), ShouldBeNil)
+				So(store["alpha"].Closed(), ShouldBeTrue)
+				So(store["bravo"].Closed(), ShouldBeTrue)
+			})
+			Convey("Running sum group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(query, "ns", now, nil)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "sum"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("5")},
+										{json.Number("11050"), json.Number("15")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "sum"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("72")},
+										{json.Number("11050"), json.Number("95")},
+										{json.Number("11100"), json.Number("21")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+			Convey("Running count group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select count(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(query, "ns", now, nil)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "count"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("5")},
+										{json.Number("11050"), json.Number("3")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "count"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("6")},
+										{json.Number("11050"), json.Number("5")},
+										{json.Number("11100"), json.Number("3")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+			Convey("Running mean group by query should work", func() {
+				db := proxima.ByName("regular")
+				So(db, ShouldNotBeNil)
+				query, err := qlutils.NewQuery(
+					"select mean(value) from load where time > now() - 1h group by time(1m), appname", now)
+				So(err, ShouldBeNil)
+				response, err := db.Query(query, "ns", now, nil)
+				So(err, ShouldBeNil)
+				So(response, ShouldResemble, &client.Response{
+					Results: []client.Result{
+						{
+							Series: []models.Row{
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "imgserver"},
+									Columns: []string{"time", "mean"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("1")},
+										{json.Number("11050"), json.Number("5")},
+										{json.Number("11100"), nil},
+									},
+								},
+								{
+									Name:    "load",
+									Tags:    map[string]string{"appname": "subd"},
+									Columns: []string{"time", "mean"},
+									Values: [][]interface{}{
+										{json.Number("11000"), json.Number("12")},
+										{json.Number("11050"), json.Number("19")},
+										{json.Number("11100"), json.Number("7")},
+									},
+								},
+							},
+						},
+					},
+				})
+			})
+		})
+
+	})
+}
+
 func TestAPI(t *testing.T) {
 	Convey("Given fake sources", t, func() {
 		now := time.Date(2016, 12, 1, 0, 1, 0, 0, time.UTC)
 		// All of our fake servers / backends
-		store := handleStoreType{
-			"alpha":       &fakeHandleType{},
-			"bravo":       &fakeHandleType{},
-			"charlie":     &fakeHandleType{},
-			"delta":       &fakeHandleType{},
-			"echo":        &fakeHandleType{},
-			"foxtrot":     &fakeHandleType{},
-			"error":       &fakeHandleType{},
-			"error1":      &fakeHandleType{},
-			"unsupported": &fakeHandleType{},
+		store := dbQueryerStoreType{
+			"alpha":       &fakeDbQueryerType{},
+			"bravo":       &fakeDbQueryerType{},
+			"charlie":     &fakeDbQueryerType{},
+			"delta":       &fakeDbQueryerType{},
+			"echo":        &fakeDbQueryerType{},
+			"foxtrot":     &fakeDbQueryerType{},
+			"error":       &fakeDbQueryerType{},
+			"error1":      &fakeDbQueryerType{},
+			"unsupported": &fakeDbQueryerType{},
 		}
 		// These lines tell each fake what to return when queried.
 		store["alpha"].WhenQueriedReturn(newResponse(1000, 10, 1200, 11), nil)
@@ -283,7 +609,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					So(*response, ShouldBeZeroValue)
 				})
@@ -295,7 +621,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ms", now)
+					response, err := db.Query(query, "ms", now, nil)
 					So(err, ShouldBeNil)
 					// In the case that scotty doesn't support the query,
 					// rely on the influx servers.
@@ -315,7 +641,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					// influx backend with shortest retention policy always
 					// takes precedence.
@@ -363,7 +689,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 120h and time < now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					So(response, ShouldResemble, newResponse(
 						1000, 10,
@@ -405,7 +731,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ms", now)
+					response, err := db.Query(query, "ms", now, nil)
 					So(err, ShouldBeNil)
 					// scotty server listed last takes precedence.
 					So(response, ShouldResemble, newResponse(

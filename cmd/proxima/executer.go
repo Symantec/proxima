@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"github.com/Symantec/Dominator/lib/log"
 	"github.com/Symantec/proxima/common"
 	"github.com/Symantec/proxima/config"
 	"github.com/Symantec/scotty/influx/qlutils"
@@ -11,7 +12,6 @@ import (
 	"github.com/Symantec/tricorder/go/tricorder/units"
 	"github.com/influxdata/influxdb/client/v2"
 	"io"
-	"log"
 	"strconv"
 	"time"
 )
@@ -189,7 +189,7 @@ func (e *executerType) Names() []string {
 // Query uses the logger instance to report any influx instances that are
 // down.
 func (e *executerType) Query(
-	logger *log.Logger, queryStr, database, epoch string) (
+	queryStr, database, epoch string, logger log.Logger) (
 	*client.Response, error) {
 	id, p := e.proxima.Get()
 	defer e.proxima.Put(id)
@@ -202,5 +202,5 @@ func (e *executerType) Query(
 	if db == nil {
 		return nil, kErrNoSuchDatabase
 	}
-	return db.Query(logger, query, epoch, now)
+	return db.Query(query, epoch, now, logger)
 }

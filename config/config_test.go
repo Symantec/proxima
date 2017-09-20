@@ -29,6 +29,12 @@ databases:
   scotties:
   - hostAndPort: scotty11
   - hostAndPort: scotty12
+  - partials:
+    - hostAndPort: scotty21
+    - hostAndPort: scotty22
+  - scotties:
+    - hostAndPort: scotty31
+    - hostAndPort: scotty32
 `
 		buffer := bytes.NewBuffer(([]byte)(configContents))
 		var proxima config.Proxima
@@ -59,6 +65,14 @@ databases:
 					Scotties: config.ScottyList{
 						{HostAndPort: "scotty11"},
 						{HostAndPort: "scotty12"},
+						{Partials: config.ScottyList{
+							{HostAndPort: "scotty21"},
+							{HostAndPort: "scotty22"},
+						}},
+						{Scotties: config.ScottyList{
+							{HostAndPort: "scotty31"},
+							{HostAndPort: "scotty32"},
+						}},
 					},
 				},
 			},

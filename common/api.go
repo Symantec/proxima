@@ -2,31 +2,33 @@
 package common
 
 import (
+	"github.com/Symantec/Dominator/lib/log"
 	"github.com/Symantec/proxima/config"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
-	"log"
 	"time"
 )
 
 // Influx represents a single influx backend.
 type Influx struct {
-	data   config.Influx
-	handle handleType
+	data      config.Influx
+	dbQueryer dbQueryerType
 }
 
 func NewInflux(influx config.Influx) (*Influx, error) {
-	return newInfluxForTesting(influx, influxCreateHandle)
+	return newInfluxForTesting(influx, influxCreateDbQueryer)
 }
 
 // Query runs a query against this backend.
-func (d *Influx) Query(queryStr, epoch string) (*client.Response, error) {
-	return d.handle.Query(queryStr, d.data.Database, epoch)
+func (d *Influx) Query(
+	query *influxql.Query, epoch string, logger log.Logger) (
+	*client.Response, error) {
+	return d.dbQueryer.Query(query.String(), d.data.Database, epoch)
 }
 
 // Close frees any resources associated with this instance.
 func (d *Influx) Close() error {
-	return d.handle.Close()
+	return d.dbQueryer.Close()
 }
 
 // InfluxList represents a group of influx backends.
@@ -38,15 +40,15 @@ type InfluxList struct {
 // NewInfluxList returns a new instancce. If the length of influxes is 0,
 // NewInfluxList returns nil.
 func NewInfluxList(influxes config.InfluxList) (*InfluxList, error) {
-	return newInfluxListForTesting(influxes, influxCreateHandle)
+	return newInfluxListForTesting(influxes, influxCreateDbQueryer)
 }
 
 // Query runs a query against the backends in this group merging the resuls
 // into a single response.
 func (l *InfluxList) Query(
-	logger *log.Logger, query *influxql.Query, epoch string, now time.Time) (
+	query *influxql.Query, epoch string, now time.Time, logger log.Logger) (
 	*client.Response, error) {
-	return l.query(logger, query, epoch, now)
+	return l.query(query, epoch, now, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -56,25 +58,54 @@ func (l *InfluxList) Close() error {
 
 // Scotty represents a single scotty server.
 type Scotty struct {
-	data   config.Scotty
-	handle handleType
+	// connects to a particular scotty. Only one of these fields will be
+	// non nil
+	dbQueryer dbQueryerType
+
+	// Scotties which all together represent the data
+	partials *ScottyPartials
+
+	// Each scotty represents the same data.
+	scotties *ScottyList
 }
 
 func NewScotty(scotty config.Scotty) (*Scotty, error) {
-	return newScottyForTesting(scotty, influxCreateHandle)
+	return newScottyForTesting(scotty, influxCreateDbQueryer)
 }
 
-// Query runs a query against this scotty server.
-func (s *Scotty) Query(queryStr, epoch string) (*client.Response, error) {
-	return s.handle.Query(queryStr, "scotty", epoch)
+func (s *Scotty) Query(
+	query *influxql.Query, epoch string, logger log.Logger) (
+	*client.Response, error) {
+	return s.query(query, epoch, logger)
 }
 
 // Close frees any resources associated with this instance.
 func (s *Scotty) Close() error {
-	return s.handle.Close()
+	return s._close()
 }
 
-// ScottyList represents a group of scotty servers.
+// ScottyPartials represents a list of scotties where all the scotties
+// together represent the data. All scotties must respond to each query.
+type ScottyPartials struct {
+	instances []*Scotty
+}
+
+func NewScottyPartials(scotties config.ScottyList) (*ScottyPartials, error) {
+	return newScottyPartialsForTesting(scotties, influxCreateDbQueryer)
+}
+
+func (l *ScottyPartials) Query(
+	query *influxql.Query, epoch string, logger log.Logger) (
+	*client.Response, error) {
+	return l.query(query, epoch, logger)
+}
+
+func (l *ScottyPartials) Close() error {
+	return l._close()
+}
+
+// ScottyList represents a group of scotty servers. Unlike ScottyPartials,
+// each Scotty has the same data only one scotty has to respond to each query.
 // nil represents the group of zero scotty servers.
 type ScottyList struct {
 	instances []*Scotty
@@ -83,15 +114,15 @@ type ScottyList struct {
 // NewScottyList returns a new instancce. If the length of scotties is 0,
 // NewScottyList returns nil.
 func NewScottyList(scotties config.ScottyList) (*ScottyList, error) {
-	return newScottyListForTesting(scotties, influxCreateHandle)
+	return newScottyListForTesting(scotties, influxCreateDbQueryer)
 }
 
 // Query runs a query against the servers in this group merging the resuls
 // into a single response.
 func (l *ScottyList) Query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
-	return l.query(logger, query, epoch)
+	return l.query(query, epoch, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -107,7 +138,7 @@ type Database struct {
 }
 
 func NewDatabase(db config.Database) (*Database, error) {
-	return newDatabaseForTesting(db, influxCreateHandle)
+	return newDatabaseForTesting(db, influxCreateDbQueryer)
 }
 
 func (d *Database) Name() string {
@@ -117,11 +148,11 @@ func (d *Database) Name() string {
 // Query runs a query against the influx backends and scotty servers in this
 // proxima configuration.
 func (d *Database) Query(
-	logger *log.Logger,
 	query *influxql.Query,
 	epoch string,
-	now time.Time) (*client.Response, error) {
-	return d.query(logger, query, epoch, now)
+	now time.Time,
+	logger log.Logger) (*client.Response, error) {
+	return d.query(query, epoch, now, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -136,7 +167,7 @@ type Proxima struct {
 }
 
 func NewProxima(proxima config.Proxima) (*Proxima, error) {
-	return newProximaForTesting(proxima, influxCreateHandle)
+	return newProximaForTesting(proxima, influxCreateDbQueryer)
 }
 
 // ByName returns the configuration with given name or nil if no such
