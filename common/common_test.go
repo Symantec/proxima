@@ -15,8 +15,8 @@ import (
 )
 
 var (
-	kErrCreatingHandle = errors.New("common:Error creating handle")
-	kErrSomeError      = errors.New("common:some error")
+	kErrCreatingDbQueryer = errors.New("common:Error creating DbQueryer")
+	kErrSomeError         = errors.New("common:some error")
 )
 
 type queryCallType struct {
@@ -30,9 +30,9 @@ type fakeResponseType struct {
 	Err      error
 }
 
-// fakeHandleType represents a connection to a fake influx backend or
+// fakeDbQueryerType represents a connection to a fake influx backend or
 // scotty server.
-type fakeHandleType struct {
+type fakeDbQueryerType struct {
 	queryCalls []queryCallType
 
 	byQuery       map[string]fakeResponseType
@@ -41,7 +41,7 @@ type fakeHandleType struct {
 	closed        bool
 }
 
-func (f *fakeHandleType) WhenQueryIsReturn(
+func (f *fakeDbQueryerType) WhenQueryIsReturn(
 	query string, response *client.Response, err error) {
 	if f.byQuery == nil {
 		f.byQuery = make(map[string]fakeResponseType)
@@ -53,7 +53,7 @@ func (f *fakeHandleType) WhenQueryIsReturn(
 // WhenQueriedReturn instructs this fake to return a particular response
 // or error when queried. This fake always returns this same response
 // regardless of the actual query.
-func (f *fakeHandleType) WhenQueriedReturn(
+func (f *fakeDbQueryerType) WhenQueriedReturn(
 	response *client.Response, err error) {
 	f.queryResponse, f.queryError = response, err
 }
@@ -63,7 +63,7 @@ func (f *fakeHandleType) WhenQueriedReturn(
 // and the epoch, the precision of the times e.g "ns", "ms", "s", etc.
 // If previous NextQuery calls have already returned all the queries made
 // against this fake, NextQuery panics.
-func (f *fakeHandleType) NextQuery() (
+func (f *fakeDbQueryerType) NextQuery() (
 	query, database, epoch string) {
 	query = f.queryCalls[0].query
 	database = f.queryCalls[0].database
@@ -75,22 +75,22 @@ func (f *fakeHandleType) NextQuery() (
 }
 
 // NoMoreQueries returns true if NextQuery would panic.
-func (f *fakeHandleType) NoMoreQueries() bool {
+func (f *fakeDbQueryerType) NoMoreQueries() bool {
 	return len(f.queryCalls) == 0
 }
 
 // Closed returns true if Close was called on this fake
-func (f *fakeHandleType) Closed() bool {
+func (f *fakeDbQueryerType) Closed() bool {
 	return f.closed
 }
 
 // Query sends a query to the fake influx or scotty server, records the
 // query sent, and returns the same response and error passed to
 // WhenQueriedReturn.
-func (f *fakeHandleType) Query(queryStr, database, epoch string) (
+func (f *fakeDbQueryerType) Query(queryStr, database, epoch string) (
 	*client.Response, error) {
 	if f.closed {
-		panic("Cannot query a closed handle")
+		panic("Cannot query a closed dbQueryer")
 	}
 	f.queryCalls = append(
 		f.queryCalls,
@@ -110,26 +110,26 @@ func (f *fakeHandleType) Query(queryStr, database, epoch string) (
 }
 
 // Close closes the connection to the fake influx or scotty server.
-func (f *fakeHandleType) Close() error {
+func (f *fakeDbQueryerType) Close() error {
 	f.closed = true
 	return nil
 }
 
-// handleStoreType is a collection of fake influx backends and scotty servers
+// dbQueryerStoreType is a collection of fake influx backends and scotty servers
 // keyed by their host and port.
-type handleStoreType map[string]*fakeHandleType
+type dbQueryerStoreType map[string]*fakeDbQueryerType
 
 // Create returns the connection to the fake server given its host and port.
-func (s handleStoreType) Create(addr string) (handleType, error) {
+func (s dbQueryerStoreType) Create(addr string) (dbQueryerType, error) {
 	result, ok := s[addr]
 	if !ok {
-		return nil, kErrCreatingHandle
+		return nil, kErrCreatingDbQueryer
 	}
 	return result, nil
 }
 
 // AllClose returns true if all connections to all fakes have been closed.
-func (s handleStoreType) AllClosed() bool {
+func (s dbQueryerStoreType) AllClosed() bool {
 	for _, h := range s {
 		if !h.Closed() {
 			return false
@@ -169,10 +169,10 @@ func newResponse(values ...int64) *client.Response {
 func TestScottyPartial(t *testing.T) {
 	Convey("Given fake sources", t, func() {
 		now := time.Date(2017, 5, 13, 19, 0, 0, 0, time.UTC)
-		store := handleStoreType{
-			"alpha": &fakeHandleType{},
-			"bravo": &fakeHandleType{},
-			"error": &fakeHandleType{},
+		store := dbQueryerStoreType{
+			"alpha": &fakeDbQueryerType{},
+			"bravo": &fakeDbQueryerType{},
+			"error": &fakeDbQueryerType{},
 		}
 		store["error"].WhenQueriedReturn(nil, kErrSomeError)
 		store["alpha"].WhenQueryIsReturn(
@@ -472,16 +472,16 @@ func TestAPI(t *testing.T) {
 	Convey("Given fake sources", t, func() {
 		now := time.Date(2016, 12, 1, 0, 1, 0, 0, time.UTC)
 		// All of our fake servers / backends
-		store := handleStoreType{
-			"alpha":       &fakeHandleType{},
-			"bravo":       &fakeHandleType{},
-			"charlie":     &fakeHandleType{},
-			"delta":       &fakeHandleType{},
-			"echo":        &fakeHandleType{},
-			"foxtrot":     &fakeHandleType{},
-			"error":       &fakeHandleType{},
-			"error1":      &fakeHandleType{},
-			"unsupported": &fakeHandleType{},
+		store := dbQueryerStoreType{
+			"alpha":       &fakeDbQueryerType{},
+			"bravo":       &fakeDbQueryerType{},
+			"charlie":     &fakeDbQueryerType{},
+			"delta":       &fakeDbQueryerType{},
+			"echo":        &fakeDbQueryerType{},
+			"foxtrot":     &fakeDbQueryerType{},
+			"error":       &fakeDbQueryerType{},
+			"error1":      &fakeDbQueryerType{},
+			"unsupported": &fakeDbQueryerType{},
 		}
 		// These lines tell each fake what to return when queried.
 		store["alpha"].WhenQueriedReturn(newResponse(1000, 10, 1200, 11), nil)

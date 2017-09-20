@@ -11,24 +11,24 @@ import (
 
 // Influx represents a single influx backend.
 type Influx struct {
-	data   config.Influx
-	handle handleType
+	data      config.Influx
+	dbQueryer dbQueryerType
 }
 
 func NewInflux(influx config.Influx) (*Influx, error) {
-	return newInfluxForTesting(influx, influxCreateHandle)
+	return newInfluxForTesting(influx, influxCreateDbQueryer)
 }
 
 // Query runs a query against this backend.
 func (d *Influx) Query(
 	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
-	return d.handle.Query(query.String(), d.data.Database, epoch)
+	return d.dbQueryer.Query(query.String(), d.data.Database, epoch)
 }
 
 // Close frees any resources associated with this instance.
 func (d *Influx) Close() error {
-	return d.handle.Close()
+	return d.dbQueryer.Close()
 }
 
 // InfluxList represents a group of influx backends.
@@ -40,7 +40,7 @@ type InfluxList struct {
 // NewInfluxList returns a new instancce. If the length of influxes is 0,
 // NewInfluxList returns nil.
 func NewInfluxList(influxes config.InfluxList) (*InfluxList, error) {
-	return newInfluxListForTesting(influxes, influxCreateHandle)
+	return newInfluxListForTesting(influxes, influxCreateDbQueryer)
 }
 
 // Query runs a query against the backends in this group merging the resuls
@@ -60,7 +60,7 @@ func (l *InfluxList) Close() error {
 type Scotty struct {
 	// connects to a particular scotty. Only one of these fields will be
 	// non nil
-	handle handleType
+	dbQueryer dbQueryerType
 
 	// Scotties which all together represent the data
 	partials *ScottyPartials
@@ -70,7 +70,7 @@ type Scotty struct {
 }
 
 func NewScotty(scotty config.Scotty) (*Scotty, error) {
-	return newScottyForTesting(scotty, influxCreateHandle)
+	return newScottyForTesting(scotty, influxCreateDbQueryer)
 }
 
 func (s *Scotty) Query(
@@ -91,7 +91,7 @@ type ScottyPartials struct {
 }
 
 func NewScottyPartials(scotties config.ScottyList) (*ScottyPartials, error) {
-	return newScottyPartialsForTesting(scotties, influxCreateHandle)
+	return newScottyPartialsForTesting(scotties, influxCreateDbQueryer)
 }
 
 func (l *ScottyPartials) Query(
@@ -114,7 +114,7 @@ type ScottyList struct {
 // NewScottyList returns a new instancce. If the length of scotties is 0,
 // NewScottyList returns nil.
 func NewScottyList(scotties config.ScottyList) (*ScottyList, error) {
-	return newScottyListForTesting(scotties, influxCreateHandle)
+	return newScottyListForTesting(scotties, influxCreateDbQueryer)
 }
 
 // Query runs a query against the servers in this group merging the resuls
@@ -138,7 +138,7 @@ type Database struct {
 }
 
 func NewDatabase(db config.Database) (*Database, error) {
-	return newDatabaseForTesting(db, influxCreateHandle)
+	return newDatabaseForTesting(db, influxCreateDbQueryer)
 }
 
 func (d *Database) Name() string {
@@ -167,7 +167,7 @@ type Proxima struct {
 }
 
 func NewProxima(proxima config.Proxima) (*Proxima, error) {
-	return newProximaForTesting(proxima, influxCreateHandle)
+	return newProximaForTesting(proxima, influxCreateDbQueryer)
 }
 
 // ByName returns the configuration with given name or nil if no such

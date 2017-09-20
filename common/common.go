@@ -34,39 +34,39 @@ type queryerType interface {
 		*client.Response, error)
 }
 
-// handleType represents a concrete server. Either a scotty or an influx db.
+// dbQueryerType represents a concrete server. Either a scotty or an influx db.
 // This interface exists to enable testing.
-type handleType interface {
+type dbQueryerType interface {
 	Query(queryStr, database, epoch string) (*client.Response, error)
 	Close() error
 }
 
-// Real implementation of handleType
-type influxHandleType struct {
+// Real implementation of dbQueryerType
+type influxQueryerType struct {
 	cl client.Client
 }
 
-func (q *influxHandleType) Query(queryStr, database, epoch string) (
+func (q *influxQueryerType) Query(queryStr, database, epoch string) (
 	*client.Response, error) {
 	aQuery := client.NewQuery(queryStr, database, epoch)
 	return q.cl.Query(aQuery)
 }
 
-func (q *influxHandleType) Close() error {
+func (q *influxQueryerType) Close() error {
 	return q.cl.Close()
 }
 
 // Type is here for testing. Tests have a function that creates a mock
-// handleType.
-type handleCreaterType func(addr string) (handleType, error)
+// dbQueryerType.
+type dbQueryerCreaterType func(addr string) (dbQueryerType, error)
 
-// Creates a *real* handleType given a host and port
-func influxCreateHandle(addr string) (handleType, error) {
+// Creates a *real* dbQueryerType given a host and port
+func influxCreateDbQueryer(addr string) (dbQueryerType, error) {
 	cl, err := client.NewHTTPClient(client.HTTPConfig{Addr: addr})
 	if err != nil {
 		return nil, err
 	}
-	return &influxHandleType{cl: cl}, nil
+	return &influxQueryerType{cl: cl}, nil
 }
 
 // getRawConcurrentResponses does multiple querying concurrently.
@@ -155,16 +155,16 @@ func getConcurrentResponses(
 }
 
 func newInfluxForTesting(
-	influx config.Influx, creater handleCreaterType) (*Influx, error) {
-	handle, err := creater(influx.HostAndPort)
+	influx config.Influx, creater dbQueryerCreaterType) (*Influx, error) {
+	dbQueryer, err := creater(influx.HostAndPort)
 	if err != nil {
 		return nil, err
 	}
-	return &Influx{data: influx, handle: handle}, nil
+	return &Influx{data: influx, dbQueryer: dbQueryer}, nil
 }
 
 func newInfluxListForTesting(
-	influxes config.InfluxList, creater handleCreaterType) (
+	influxes config.InfluxList, creater dbQueryerCreaterType) (
 	*InfluxList, error) {
 	if len(influxes) == 0 {
 		return nil, nil
@@ -239,13 +239,13 @@ func (l *InfluxList) query(
 }
 
 func newScottyForTesting(
-	scotty config.Scotty, creater handleCreaterType) (*Scotty, error) {
+	scotty config.Scotty, creater dbQueryerCreaterType) (*Scotty, error) {
 	if scotty.HostAndPort != "" {
-		handle, err := creater(scotty.HostAndPort)
+		dbQueryer, err := creater(scotty.HostAndPort)
 		if err != nil {
 			return nil, err
 		}
-		return &Scotty{handle: handle}, nil
+		return &Scotty{dbQueryer: dbQueryer}, nil
 	}
 	if len(scotty.Partials) != 0 {
 		partials, err := newScottyPartialsForTesting(scotty.Partials, creater)
@@ -268,8 +268,8 @@ func (s *Scotty) query(
 	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
 	switch {
-	case s.handle != nil:
-		return s.handle.Query(query.String(), "scotty", epoch)
+	case s.dbQueryer != nil:
+		return s.dbQueryer.Query(query.String(), "scotty", epoch)
 	case s.partials != nil:
 		return s.partials.Query(query, epoch, logger)
 	case s.scotties != nil:
@@ -280,8 +280,8 @@ func (s *Scotty) query(
 }
 
 func (s *Scotty) _close() error {
-	if s.handle != nil {
-		return s.handle.Close()
+	if s.dbQueryer != nil {
+		return s.dbQueryer.Close()
 	}
 	if s.partials != nil {
 		return s.partials.Close()
@@ -293,7 +293,7 @@ func (s *Scotty) _close() error {
 }
 
 func newScottyPartialsForTesting(
-	scotties config.ScottyList, creater handleCreaterType) (
+	scotties config.ScottyList, creater dbQueryerCreaterType) (
 	*ScottyPartials, error) {
 	if len(scotties) == 0 {
 		panic("Scotty list must be non-empty")
@@ -335,7 +335,7 @@ func (l *ScottyPartials) query(
 }
 
 func newScottyListForTesting(
-	scotties config.ScottyList, creater handleCreaterType) (
+	scotties config.ScottyList, creater dbQueryerCreaterType) (
 	*ScottyList, error) {
 	if len(scotties) == 0 {
 		return nil, nil
@@ -380,7 +380,7 @@ func (l *ScottyList) query(
 }
 
 func newDatabaseForTesting(
-	db config.Database, creater handleCreaterType) (*Database, error) {
+	db config.Database, creater dbQueryerCreaterType) (*Database, error) {
 	result := &Database{name: db.Name}
 	var err error
 	result.influxes, err = newInfluxListForTesting(db.Influxes, creater)
@@ -450,7 +450,7 @@ func (d *Database) query(
 }
 
 func newProximaForTesting(
-	proxima config.Proxima, creater handleCreaterType) (*Proxima, error) {
+	proxima config.Proxima, creater dbQueryerCreaterType) (*Proxima, error) {
 	result := &Proxima{dbs: make(map[string]*Database)}
 	for _, dbSpec := range proxima.Dbs {
 		db, err := newDatabaseForTesting(dbSpec, creater)
