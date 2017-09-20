@@ -3,13 +3,13 @@ package common
 import (
 	"errors"
 	"fmt"
+	"github.com/Symantec/Dominator/lib/log"
 	"github.com/Symantec/proxima/config"
 	"github.com/Symantec/scotty/influx/qlutils"
 	"github.com/Symantec/scotty/influx/responses"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
 	"github.com/influxdata/influxdb/models"
-	"log"
 	"sort"
 	"sync"
 	"time"
@@ -30,7 +30,7 @@ func (l *lastErrorType) Error() error {
 }
 
 type queryerType interface {
-	Query(l *log.Logger, q *influxql.Query, epoch string) (
+	Query(q *influxql.Query, epoch string, l log.Logger) (
 		*client.Response, error)
 }
 
@@ -77,7 +77,7 @@ func getRawConcurrentResponses(
 	endpoints []queryerType,
 	queries []*influxql.Query,
 	epoch string,
-	logger *log.Logger) (
+	logger log.Logger) (
 	responseList []*client.Response, errs []error) {
 	if len(endpoints) != len(queries) {
 		panic("endpoints and queries parameters must have same length")
@@ -99,7 +99,7 @@ func getRawConcurrentResponses(
 			query *influxql.Query,
 			responseHere **client.Response,
 			errHere *error) {
-			*responseHere, *errHere = n.Query(logger, query, epoch)
+			*responseHere, *errHere = n.Query(query, epoch, logger)
 			wg.Done()
 		}(endpoints[i],
 			query,
@@ -118,7 +118,7 @@ func getConcurrentResponses(
 	endpoints []queryerType,
 	queries []*influxql.Query,
 	epoch string,
-	logger *log.Logger) (*client.Response, error) {
+	logger log.Logger) (*client.Response, error) {
 	responseList, errs := getRawConcurrentResponses(
 		endpoints, queries, epoch, logger)
 
@@ -222,7 +222,7 @@ func (l *InfluxList) minTime(i int, now time.Time) time.Time {
 }
 
 func (l *InfluxList) query(
-	logger *log.Logger, query *influxql.Query, epoch string, now time.Time) (
+	query *influxql.Query, epoch string, now time.Time, logger log.Logger) (
 	*client.Response, error) {
 	if l == nil {
 		return responses.Merge()
@@ -265,15 +265,15 @@ func newScottyForTesting(
 }
 
 func (s *Scotty) query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
 	switch {
 	case s.handle != nil:
 		return s.handle.Query(query.String(), "scotty", epoch)
 	case s.partials != nil:
-		return s.partials.Query(logger, query, epoch)
+		return s.partials.Query(query, epoch, logger)
 	case s.scotties != nil:
-		return s.scotties.Query(logger, query, epoch)
+		return s.scotties.Query(query, epoch, logger)
 	}
 	// Should never get here.
 	panic("query should return something")
@@ -321,7 +321,7 @@ func (l *ScottyPartials) _close() error {
 }
 
 func (l *ScottyPartials) query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
 	endpoints := make([]queryerType, len(l.instances))
 	for i := range endpoints {
@@ -363,7 +363,7 @@ func (l *ScottyList) _close() error {
 }
 
 func (l *ScottyList) query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
 	if l == nil {
 		return responses.Merge()
@@ -402,18 +402,18 @@ func (d *Database) _close() error {
 }
 
 func (d *Database) query(
-	logger *log.Logger,
 	query *influxql.Query,
 	epoch string,
-	now time.Time) (*client.Response, error) {
+	now time.Time,
+	logger log.Logger) (*client.Response, error) {
 	if d.influxes == nil && d.scotties == nil {
 		return responses.Merge()
 	}
 	if d.influxes == nil {
-		return d.scotties.Query(logger, query, epoch)
+		return d.scotties.Query(query, epoch, logger)
 	}
 	if d.scotties == nil {
-		return d.influxes.Query(logger, query, epoch, now)
+		return d.influxes.Query(query, epoch, now, logger)
 	}
 	var wg sync.WaitGroup
 	var influxResponse *client.Response
@@ -421,15 +421,14 @@ func (d *Database) query(
 	wg.Add(1)
 	go func() {
 		influxResponse, influxError = d.influxes.Query(
-			logger, query, epoch, now)
+			query, epoch, now, logger)
 		wg.Done()
 	}()
 	var scottyResponse *client.Response
 	var scottyError error
 	wg.Add(1)
 	go func() {
-		scottyResponse, scottyError = d.scotties.Query(
-			logger, query, epoch)
+		scottyResponse, scottyError = d.scotties.Query(query, epoch, logger)
 		wg.Done()
 	}()
 	wg.Wait()
@@ -489,7 +488,7 @@ func sumUpScottyResponses(
 	endpoints []queryerType,
 	stmt influxql.Statement,
 	epoch string,
-	logger *log.Logger) (result []models.Row, err error) {
+	logger log.Logger) (result []models.Row, err error) {
 	queries := make([]*influxql.Query, len(endpoints))
 	query := qlutils.SingleQuery(stmt)
 	for i := range queries {
@@ -525,7 +524,7 @@ func aggregateScottyStmtResponses(
 	endpoints []queryerType,
 	stmt influxql.Statement,
 	epoch string,
-	logger *log.Logger) (result client.Result, err error) {
+	logger log.Logger) (result client.Result, err error) {
 	aggregationType, err := qlutils.AggregationType(stmt)
 	if err != nil {
 		return
@@ -597,7 +596,7 @@ func aggregateScottyResponses(
 	endpoints []queryerType,
 	query *influxql.Query,
 	epoch string,
-	logger *log.Logger) (*client.Response, error) {
+	logger log.Logger) (*client.Response, error) {
 	var results []client.Result
 	for _, stmt := range query.Statements {
 		result, err := aggregateScottyStmtResponses(

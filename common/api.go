@@ -2,10 +2,10 @@
 package common
 
 import (
+	"github.com/Symantec/Dominator/lib/log"
 	"github.com/Symantec/proxima/config"
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/influxql"
-	"log"
 	"time"
 )
 
@@ -21,7 +21,8 @@ func NewInflux(influx config.Influx) (*Influx, error) {
 
 // Query runs a query against this backend.
 func (d *Influx) Query(
-	logger *log.Logger, query *influxql.Query, epoch string) (*client.Response, error) {
+	query *influxql.Query, epoch string, logger log.Logger) (
+	*client.Response, error) {
 	return d.handle.Query(query.String(), d.data.Database, epoch)
 }
 
@@ -45,9 +46,9 @@ func NewInfluxList(influxes config.InfluxList) (*InfluxList, error) {
 // Query runs a query against the backends in this group merging the resuls
 // into a single response.
 func (l *InfluxList) Query(
-	logger *log.Logger, query *influxql.Query, epoch string, now time.Time) (
+	query *influxql.Query, epoch string, now time.Time, logger log.Logger) (
 	*client.Response, error) {
-	return l.query(logger, query, epoch, now)
+	return l.query(query, epoch, now, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -73,9 +74,9 @@ func NewScotty(scotty config.Scotty) (*Scotty, error) {
 }
 
 func (s *Scotty) Query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
-	return s.query(logger, query, epoch)
+	return s.query(query, epoch, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -94,9 +95,9 @@ func NewScottyPartials(scotties config.ScottyList) (*ScottyPartials, error) {
 }
 
 func (l *ScottyPartials) Query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
-	return l.query(logger, query, epoch)
+	return l.query(query, epoch, logger)
 }
 
 func (l *ScottyPartials) Close() error {
@@ -119,9 +120,9 @@ func NewScottyList(scotties config.ScottyList) (*ScottyList, error) {
 // Query runs a query against the servers in this group merging the resuls
 // into a single response.
 func (l *ScottyList) Query(
-	logger *log.Logger, query *influxql.Query, epoch string) (
+	query *influxql.Query, epoch string, logger log.Logger) (
 	*client.Response, error) {
-	return l.query(logger, query, epoch)
+	return l.query(query, epoch, logger)
 }
 
 // Close frees any resources associated with this instance.
@@ -147,11 +148,11 @@ func (d *Database) Name() string {
 // Query runs a query against the influx backends and scotty servers in this
 // proxima configuration.
 func (d *Database) Query(
-	logger *log.Logger,
 	query *influxql.Query,
 	epoch string,
-	now time.Time) (*client.Response, error) {
-	return d.query(logger, query, epoch, now)
+	now time.Time,
+	logger log.Logger) (*client.Response, error) {
+	return d.query(query, epoch, now, logger)
 }
 
 // Close frees any resources associated with this instance.

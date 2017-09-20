@@ -4,7 +4,8 @@ import (
 	"flag"
 	"github.com/Symantec/Dominator/lib/flagutil"
 	"github.com/Symantec/Dominator/lib/fsutil"
-	"github.com/Symantec/Dominator/lib/logbuf"
+	"github.com/Symantec/Dominator/lib/log"
+	"github.com/Symantec/Dominator/lib/log/serverlogger"
 	"github.com/Symantec/proxima/cmd/proxima/splash"
 	"github.com/Symantec/scotty/influx/responses"
 	"github.com/Symantec/scotty/lib/apiutil"
@@ -13,7 +14,6 @@ import (
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/influxdata/influxdb/models"
 	"github.com/influxdata/influxdb/uuid"
-	"log"
 	"net/http"
 	"net/rpc"
 	"net/url"
@@ -55,8 +55,8 @@ type resultListType struct {
 
 func performQuery(
 	executer *executerType,
-	logger *log.Logger,
-	query, db, epoch string) (interface{}, error) {
+	query, db, epoch string,
+	logger log.Logger) (interface{}, error) {
 	switch strings.ToUpper(query) {
 	case "SHOW MEASUREMENTS LIMIT 1":
 		return responses.Serialise(&client.Response{
@@ -92,7 +92,7 @@ func performQuery(
 			},
 		})
 	default:
-		resp, err := executer.Query(logger, query, db, epoch)
+		resp, err := executer.Query(query, db, epoch, logger)
 		if err != nil {
 			return nil, err
 		}
@@ -112,8 +112,7 @@ func main() {
 	tricorder.RegisterFlags()
 	flag.Parse()
 	rpc.HandleHTTP()
-	circularBuffer := logbuf.New()
-	logger := log.New(circularBuffer, "", log.LstdFlags)
+	logger := serverlogger.New("")
 	executer := newExecuter()
 	changeCh := fsutil.WatchFile(*fConfigFile, logger)
 	// We want to be sure we have something valid in the config file
@@ -137,7 +136,7 @@ func main() {
 	}()
 	http.Handle("/",
 		&splash.Handler{
-			Log: circularBuffer,
+			Log: logger,
 		})
 	http.Handle(
 		"/ping",
@@ -150,10 +149,10 @@ func main() {
 				func(req url.Values) (interface{}, error) {
 					resp, err := performQuery(
 						executer,
-						logger,
 						req.Get("q"),
 						req.Get("db"),
-						req.Get("epoch"))
+						req.Get("epoch"),
+						logger)
 					if err != nil {
 						return nil, err
 					}
@@ -164,17 +163,17 @@ func main() {
 		),
 	)
 	if len(fPorts) == 0 {
-		log.Fatal("At least one port required.")
+		logger.Fatal("At least one port required.")
 	}
 	for _, port := range fPorts[1:] {
 		go func(port string) {
 			if err := http.ListenAndServe(":"+port, nil); err != nil {
-				log.Fatal(err)
+				logger.Fatal(err)
 			}
 		}(port)
 	}
 	healthserver.SetReady()
 	if err := http.ListenAndServe(":"+fPorts[0], nil); err != nil {
-		log.Fatal(err)
+		logger.Fatal(err)
 	}
 }

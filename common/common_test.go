@@ -323,7 +323,7 @@ func TestScottyPartial(t *testing.T) {
 			query, err := qlutils.NewQuery(
 				"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
 			So(err, ShouldBeNil)
-			_, err = db.Query(nil, query, "ns", now)
+			_, err = db.Query(query, "ns", now, nil)
 			So(err, ShouldEqual, kErrSomeError)
 		})
 
@@ -358,7 +358,7 @@ func TestScottyPartial(t *testing.T) {
 				query, err := qlutils.NewQuery(
 					"select sum(value) from load where time > now() - 1h group by time(1m), appname", now)
 				So(err, ShouldBeNil)
-				response, err := db.Query(nil, query, "ns", now)
+				response, err := db.Query(query, "ns", now, nil)
 				So(err, ShouldBeNil)
 				So(response, ShouldResemble, &client.Response{
 					Results: []client.Result{
@@ -395,7 +395,7 @@ func TestScottyPartial(t *testing.T) {
 				query, err := qlutils.NewQuery(
 					"select count(value) from load where time > now() - 1h group by time(1m), appname", now)
 				So(err, ShouldBeNil)
-				response, err := db.Query(nil, query, "ns", now)
+				response, err := db.Query(query, "ns", now, nil)
 				So(err, ShouldBeNil)
 				So(response, ShouldResemble, &client.Response{
 					Results: []client.Result{
@@ -432,7 +432,7 @@ func TestScottyPartial(t *testing.T) {
 				query, err := qlutils.NewQuery(
 					"select mean(value) from load where time > now() - 1h group by time(1m), appname", now)
 				So(err, ShouldBeNil)
-				response, err := db.Query(nil, query, "ns", now)
+				response, err := db.Query(query, "ns", now, nil)
 				So(err, ShouldBeNil)
 				So(response, ShouldResemble, &client.Response{
 					Results: []client.Result{
@@ -609,7 +609,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					So(*response, ShouldBeZeroValue)
 				})
@@ -621,7 +621,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ms", now)
+					response, err := db.Query(query, "ms", now, nil)
 					So(err, ShouldBeNil)
 					// In the case that scotty doesn't support the query,
 					// rely on the influx servers.
@@ -641,7 +641,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					// influx backend with shortest retention policy always
 					// takes precedence.
@@ -689,7 +689,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 120h and time < now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ns", now)
+					response, err := db.Query(query, "ns", now, nil)
 					So(err, ShouldBeNil)
 					So(response, ShouldResemble, newResponse(
 						1000, 10,
@@ -731,7 +731,7 @@ func TestAPI(t *testing.T) {
 					query, err := qlutils.NewQuery(
 						"select mean(value) from dual where time >= now() - 5h", now)
 					So(err, ShouldBeNil)
-					response, err := db.Query(nil, query, "ms", now)
+					response, err := db.Query(query, "ms", now, nil)
 					So(err, ShouldBeNil)
 					// scotty server listed last takes precedence.
 					So(response, ShouldResemble, newResponse(
