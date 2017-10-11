@@ -381,7 +381,7 @@ func TestScottyPartial(t *testing.T) {
 									Values: [][]interface{}{
 										{json.Number("11000"), json.Number("72")},
 										{json.Number("11050"), json.Number("95")},
-										{json.Number("11100"), json.Number("21")},
+										{json.Number("11100"), nil},
 									},
 								},
 							},
@@ -418,7 +418,7 @@ func TestScottyPartial(t *testing.T) {
 									Values: [][]interface{}{
 										{json.Number("11000"), json.Number("6")},
 										{json.Number("11050"), json.Number("5")},
-										{json.Number("11100"), json.Number("3")},
+										{json.Number("11100"), nil},
 									},
 								},
 							},
@@ -455,7 +455,7 @@ func TestScottyPartial(t *testing.T) {
 									Values: [][]interface{}{
 										{json.Number("11000"), json.Number("12")},
 										{json.Number("11050"), json.Number("19")},
-										{json.Number("11100"), json.Number("7")},
+										{json.Number("11100"), nil},
 									},
 								},
 							},
